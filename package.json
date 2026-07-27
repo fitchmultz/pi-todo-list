@@ -1,0 +1,22 @@
+{
+  "name": "pi-todo-list",
+  "version": "0.1.0",
+  "description": "A persistent, nested todo list for Pi agents",
+  "type": "module",
+  "keywords": ["pi-package", "todo", "agents"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions/todo-list.ts"]
+  },
+  "scripts": {
+    "test": "node --test tests/todo-state.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
