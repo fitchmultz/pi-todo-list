@@ -1,7 +1,9 @@
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
 export interface TodoItem {
   id: number;
   text: string;
-  done: boolean;
+  status: TodoStatus;
   parentId?: number;
 }
 
@@ -10,7 +12,17 @@ export interface TodoState {
   nextId: number;
 }
 
-export const TODO_MUTATIONS = ["add", "update", "move", "complete", "reopen", "remove", "clear_completed"] as const;
+export const TODO_MUTATIONS = [
+  "add",
+  "update",
+  "move",
+  "start",
+  "pause",
+  "complete",
+  "reopen",
+  "remove",
+  "clear_completed",
+] as const;
 export type TodoMutationAction = (typeof TODO_MUTATIONS)[number];
 export interface TodoMutation {
   action: TodoMutationAction;
@@ -22,7 +34,14 @@ export interface TodoMutation {
 export const emptyState = (): TodoState => ({ items: [], nextId: 1 });
 
 export function cloneState(state: TodoState): TodoState {
-  return { items: state.items.map((item) => ({ ...item })), nextId: state.nextId };
+  return {
+    items: state.items.map((item) => {
+      const legacy = item as TodoItem & { done?: boolean };
+      const { done, ...copy } = legacy;
+      return { ...copy, status: copy.status ?? (done ? "completed" : "pending") };
+    }),
+    nextId: state.nextId,
+  };
 }
 
 function item(state: TodoState, id: number): TodoItem {
@@ -49,10 +68,19 @@ function descendants(state: TodoState, id: number): Set<number> {
   }
 }
 
+function reopenCompletedAncestors(state: TodoState, target: TodoItem): void {
+  let parentId = target.parentId;
+  while (parentId !== undefined) {
+    const parent = item(state, parentId);
+    if (parent.status === "completed") parent.status = "pending";
+    parentId = parent.parentId;
+  }
+}
+
 export function addTodo(state: TodoState, text: string, parentId?: number): TodoItem {
   const value = concise(text);
-  if (parentId !== undefined && item(state, parentId).done) throw new Error("Cannot add under a completed todo");
-  const added = { id: state.nextId++, text: value, done: false, ...(parentId === undefined ? {} : { parentId }) };
+  if (parentId !== undefined && item(state, parentId).status === "completed") throw new Error("Cannot add under a completed todo");
+  const added = { id: state.nextId++, text: value, status: "pending" as const, ...(parentId === undefined ? {} : { parentId }) };
   state.items.push(added);
   return added;
 }
@@ -68,7 +96,7 @@ export function moveTodo(state: TodoState, id: number, parentId?: number): TodoI
   if (parentId !== undefined) {
     const parent = item(state, parentId);
     if (descendants(state, id).has(parent.id)) throw new Error("Cannot move a todo under itself or its descendant");
-    if (parent.done) throw new Error("Cannot move under a completed todo");
+    if (parent.status === "completed") throw new Error("Cannot move under a completed todo");
     found.parentId = parentId;
   } else {
     delete found.parentId;
@@ -76,18 +104,31 @@ export function moveTodo(state: TodoState, id: number, parentId?: number): TodoI
   return found;
 }
 
-export function setTodoDone(state: TodoState, id: number, done: boolean): number {
+export function startTodo(state: TodoState, id: number): TodoItem {
+  const target = item(state, id);
+  target.status = "in_progress";
+  reopenCompletedAncestors(state, target);
+  return target;
+}
+
+export function pauseTodo(state: TodoState, id: number): TodoItem {
+  const target = item(state, id);
+  target.status = "pending";
+  reopenCompletedAncestors(state, target);
+  return target;
+}
+
+export function completeTodo(state: TodoState, id: number): number {
+  const ids = descendants(state, item(state, id).id);
+  for (const candidate of state.items) if (ids.has(candidate.id)) candidate.status = "completed";
+  return ids.size;
+}
+
+export function reopenTodo(state: TodoState, id: number): number {
   const target = item(state, id);
   const ids = descendants(state, target.id);
-  for (const candidate of state.items) if (ids.has(candidate.id)) candidate.done = done;
-  if (!done) {
-    let parentId = target.parentId;
-    while (parentId !== undefined) {
-      const parent = item(state, parentId);
-      parent.done = false;
-      parentId = parent.parentId;
-    }
-  }
+  for (const candidate of state.items) if (ids.has(candidate.id)) candidate.status = "pending";
+  reopenCompletedAncestors(state, target);
   return ids.size;
 }
 
@@ -99,7 +140,7 @@ export function removeTodo(state: TodoState, id: number): number {
 
 export function clearCompleted(state: TodoState): number {
   const before = state.items.length;
-  state.items = state.items.filter((candidate) => !candidate.done);
+  state.items = state.items.filter((candidate) => candidate.status !== "completed");
   return before - state.items.length;
 }
 
@@ -127,14 +168,22 @@ export function applyTodoMutation(state: TodoState, operation: TodoMutation): st
       const todo = moveTodo(state, requiredId(operation), operation.parentId);
       return `Moved #${todo.id}${todo.parentId === undefined ? " to top level" : ` under #${todo.parentId}`}`;
     }
+    case "start": {
+      const todo = startTodo(state, requiredId(operation));
+      return `Started #${todo.id}: ${todo.text}`;
+    }
+    case "pause": {
+      const todo = pauseTodo(state, requiredId(operation));
+      return `Paused #${todo.id}: ${todo.text}`;
+    }
     case "complete": {
       const id = requiredId(operation);
-      const count = setTodoDone(state, id, true);
+      const count = completeTodo(state, id);
       return `Completed #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}`;
     }
     case "reopen": {
       const id = requiredId(operation);
-      const count = setTodoDone(state, id, false);
+      const count = reopenTodo(state, id);
       return `Reopened #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}`;
     }
     case "remove": {
@@ -156,7 +205,7 @@ export function applyTodoBatch(state: TodoState, operations: TodoMutation[]): st
   return messages;
 }
 
-export function orderedTodos(state: TodoState, includeDone = true): Array<{ item: TodoItem; depth: number }> {
+export function orderedTodos(state: TodoState, includeCompleted = true): Array<{ item: TodoItem; depth: number }> {
   const byParent = new Map<number | undefined, TodoItem[]>();
   for (const candidate of state.items) {
     const siblings = byParent.get(candidate.parentId) ?? [];
@@ -168,7 +217,7 @@ export function orderedTodos(state: TodoState, includeDone = true): Array<{ item
   const ordered: Array<{ item: TodoItem; depth: number }> = [];
   const visit = (parentId: number | undefined, depth: number) => {
     for (const candidate of byParent.get(parentId) ?? []) {
-      if (includeDone || !candidate.done) ordered.push({ item: candidate, depth });
+      if (includeCompleted || candidate.status !== "completed") ordered.push({ item: candidate, depth });
       visit(candidate.id, depth + 1);
     }
   };
@@ -176,9 +225,33 @@ export function orderedTodos(state: TodoState, includeDone = true): Array<{ item
   return ordered;
 }
 
-export function formatTodos(state: TodoState, includeDone = true): string {
-  const rows = orderedTodos(state, includeDone);
+export function todoCounts(state: TodoState): { pending: number; inProgress: number; completed: number } {
+  return {
+    pending: state.items.filter((item) => item.status === "pending").length,
+    inProgress: state.items.filter((item) => item.status === "in_progress").length,
+    completed: state.items.filter((item) => item.status === "completed").length,
+  };
+}
+
+export function formatTodoCounts(state: TodoState): string {
+  const counts = todoCounts(state);
+  return `TODO: ${counts.inProgress} active, ${counts.pending} pending, ${counts.completed} completed`;
+}
+
+export function formatTodos(state: TodoState, includeCompleted = true): string {
+  const rows = orderedTodos(state, includeCompleted);
   return rows.length
-    ? rows.map(({ item: todo, depth }) => `${"  ".repeat(depth)}[${todo.done ? "x" : " "}] #${todo.id} ${todo.text}`).join("\n")
+    ? rows
+        .map(({ item: todo, depth }) => {
+          const marker = todo.status === "in_progress" ? ">" : todo.status === "completed" ? "x" : "-";
+          return `${"  ".repeat(depth)}${marker} #${todo.id} ${todo.text}`;
+        })
+        .join("\n")
     : "No todos";
+}
+
+export function formatTodoSnapshot(state: TodoState, includeCompleted = false): string {
+  if (state.items.length === 0) return "No todos";
+  const rows = formatTodos(state, includeCompleted);
+  return rows === "No todos" ? formatTodoCounts(state) : `${formatTodoCounts(state)}\n${rows}`;
 }

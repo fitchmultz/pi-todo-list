@@ -6,8 +6,10 @@ import {
   applyTodoMutation,
   cloneState,
   emptyState,
-  formatTodos,
+  formatTodoCounts,
+  formatTodoSnapshot,
   orderedTodos,
+  todoCounts,
   TODO_MUTATIONS,
   type TodoState,
 } from "./todo-state.ts";
@@ -16,7 +18,7 @@ const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
 
 type Action = (typeof ACTIONS)[number];
 interface TodoDetails {
-  version: 1;
+  version: 1 | 2;
   action: Action;
   state: TodoState;
 }
@@ -30,7 +32,7 @@ const Mutation = Type.Object({
 
 const Params = Type.Object({
   action: StringEnum(ACTIONS),
-  id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID for update, move, complete, reopen, or remove" })),
+  id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID for update, move, start, pause, complete, reopen, or remove" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 240, description: "Concise todo text for add or update" })),
   parentId: Type.Optional(Type.Integer({ minimum: 1, description: "Parent todo ID for add or move; omit on move to make it top-level" })),
   operations: Type.Optional(Type.Array(Mutation, { minItems: 1, maxItems: 100, description: "Ordered mutations for batch" })),
@@ -41,7 +43,7 @@ function restore(ctx: ExtensionContext): TodoState {
   for (const entry of ctx.sessionManager.getBranch()) {
     if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "todo_list") continue;
     const details = entry.message.details as TodoDetails | undefined;
-    if (details?.version === 1) restored = cloneState(details.state);
+    if (details?.version === 1 || details?.version === 2) restored = cloneState(details.state);
   }
   return restored;
 }
@@ -58,16 +60,18 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    ctx.ui.setStatus("todo-list", ctx.ui.theme.fg("accent", `todo ${ordered.length}/${state.items.length}`));
+    const counts = todoCounts(state);
+    ctx.ui.setStatus("todo-list", ctx.ui.theme.fg("accent", `todo ${counts.inProgress} active · ${counts.pending} pending`));
     if (!widgetVisible) {
       ctx.ui.setWidget("todo-list", undefined);
       return;
     }
 
     const visible = ordered.slice(0, 8);
-    const lines = visible.map(({ item, depth }) =>
-      `${"  ".repeat(depth)}${ctx.ui.theme.fg("muted", "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`,
-    );
+    const lines = visible.map(({ item, depth }) => {
+      const active = item.status === "in_progress";
+      return `${"  ".repeat(depth)}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
+    });
     if (ordered.length > visible.length) lines.push(ctx.ui.theme.fg("dim", `… ${ordered.length - visible.length} more`));
     ctx.ui.setWidget("todo-list", lines);
   };
@@ -83,12 +87,12 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   // Refresh model-visible state only at compaction boundaries. Normal tool results
   // are append-only, preserving the provider-cacheable conversation prefix.
   pi.on("session_compact", (event) => {
-    const remaining = formatTodos(state, false);
+    const remaining = formatTodoSnapshot(state);
     if (remaining === "No todos") return;
     pi.sendMessage(
       {
         customType: "todo-list-context",
-        content: `[TODO LIST - remaining work after compaction]\n${remaining}\nKeep this list current with todo_list.`,
+        content: `[TODO LIST - state after compaction]\n${remaining}\nKeep this list current with todo_list.`,
         display: false,
       },
       // Overflow compaction is already retrying. Other compactions wait for the
@@ -100,10 +104,11 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "todo_list",
     label: "Todo List",
-    description: "Manage the session's concise nested todo list, including atomic batches",
-    promptSnippet: "Create, update, nest, complete, reopen, remove, batch, or list persistent session todos",
+    description: "Manage a persistent nested todo list with pending, in-progress, and completed items, including atomic batches",
+    promptSnippet: "Track persistent pending, in-progress, and completed work across context compaction",
     promptGuidelines: [
-      "Use todo_list to track remaining work on multi-step tasks; keep items concise and update them as work changes. Batch related mutations into one call.",
+      "At the start or resumption of multi-step work, list todos. Start items before working, complete them after verification, and pause interrupted work.",
+      "Before claiming completion, reconcile outstanding todos. Keep items concise and batch related mutations into one call.",
     ],
     parameters: Params,
     executionMode: "sequential",
@@ -111,7 +116,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       let message: string;
       if (params.action === "list") {
-        message = formatTodos(state);
+        message = formatTodoSnapshot(state, true);
       } else if (params.action === "batch") {
         if (!params.operations) throw new Error("operations is required for batch");
         const messages = applyTodoBatch(state, params.operations);
@@ -126,10 +131,10 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       }
 
       updateWidget(ctx);
-      const content = params.action === "list" ? message : `${message}\n\nRemaining:\n${formatTodos(state, false)}`;
+      const content = params.action === "list" ? message : `${message}\n${formatTodoCounts(state)}`;
       return {
         content: [{ type: "text", text: content }],
-        details: { version: 1, action: params.action, state: cloneState(state) } satisfies TodoDetails,
+        details: { version: 2, action: params.action, state: cloneState(state) } satisfies TodoDetails,
       };
     },
   });
@@ -143,7 +148,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         updateWidget(ctx);
         ctx.ui.notify(`Todo widget ${widgetVisible ? "shown" : "hidden"}`, "info");
       } else {
-        ctx.ui.notify(formatTodos(state), "info");
+        ctx.ui.notify(formatTodoSnapshot(state, true), "info");
       }
     },
   });
