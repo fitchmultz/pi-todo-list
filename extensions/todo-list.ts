@@ -15,6 +15,7 @@ import {
 } from "./todo-state.ts";
 
 const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
+const TODO_CONTEXT_TYPE = "todo-list-context";
 
 type Action = (typeof ACTIONS)[number];
 interface TodoDetails {
@@ -51,16 +52,21 @@ function restore(ctx: ExtensionContext): TodoState {
 export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
   let widgetVisible = true;
-  let refreshAfterCompaction = false;
 
-  const todoContextMessage = () => {
-    const remaining = formatTodoSnapshot(state);
-    if (remaining === "No todos") return;
-    return {
-      customType: "todo-list-context",
-      content: `[TODO LIST - state after compaction]\n${remaining}\nKeep this list current with todo_list.`,
-      display: false,
-    };
+  const todoContextMessage = () => ({
+    customType: TODO_CONTEXT_TYPE,
+    content: `[TODO LIST - state after compaction]\n${formatTodoSnapshot(state)}\nKeep this list current with todo_list.`,
+    display: false,
+  });
+
+  const needsTodoContext = (ctx: ExtensionContext): boolean => {
+    const branch = ctx.sessionManager.getBranch();
+    for (let index = branch.length - 1; index >= 0; index -= 1) {
+      const entry = branch[index]!;
+      if (entry.type === "custom_message" && entry.customType === TODO_CONTEXT_TYPE) return false;
+      if (entry.type === "compaction") return true;
+    }
+    return false;
   };
 
   const updateWidget = (ctx: ExtensionContext): void => {
@@ -92,30 +98,17 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     updateWidget(ctx);
   };
 
-  pi.on("session_start", (_event, ctx) => {
-    refreshAfterCompaction = false;
-    rehydrate(ctx);
-  });
+  pi.on("session_start", (_event, ctx) => rehydrate(ctx));
   pi.on("session_tree", (_event, ctx) => rehydrate(ctx));
 
   // Overflow compaction immediately retries the active run. Other compactions
-  // wait for the next agent start so later todo mutations cannot stale the snapshot.
+  // are detected from the active branch when its next agent turn starts.
   pi.on("session_compact", (event) => {
-    refreshAfterCompaction = false;
-    if (!event.willRetry) {
-      refreshAfterCompaction = state.items.length > 0;
-      return;
-    }
-
-    const message = todoContextMessage();
-    if (message) pi.sendMessage(message, { deliverAs: "steer", triggerTurn: false });
+    if (event.willRetry) pi.sendMessage(todoContextMessage(), { deliverAs: "steer", triggerTurn: false });
   });
 
-  pi.on("before_agent_start", () => {
-    if (!refreshAfterCompaction) return;
-    refreshAfterCompaction = false;
-    const message = todoContextMessage();
-    return message ? { message } : undefined;
+  pi.on("before_agent_start", (_event, ctx) => {
+    if (state.items.length > 0 && needsTodoContext(ctx)) return { message: todoContextMessage() };
   });
 
   pi.registerTool({

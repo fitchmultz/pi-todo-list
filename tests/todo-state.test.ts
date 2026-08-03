@@ -94,7 +94,7 @@ function createExtensionHarness() {
     message: { content: string };
     options?: { deliverAs?: string; triggerTurn?: boolean };
   }> = [];
-  const branch: Array<Record<string, unknown>> = [];
+  let branch: Array<Record<string, unknown>> = [];
   const ctx = {
     ui: {
       theme: { fg: (_color: string, text: string) => text },
@@ -114,8 +114,25 @@ function createExtensionHarness() {
     },
   } as never);
 
+  const emit = (event: string, payload: Record<string, unknown>) => {
+    const result = handlers.get(event)?.(payload, ctx);
+    const message = (result as { message?: Record<string, unknown> } | undefined)?.message;
+    if (event === "before_agent_start" && message) branch.push({ type: "custom_message", ...message });
+    return result;
+  };
+
   return {
     sent,
+    branch: () => structuredClone(branch),
+    switchBranch(entries: Array<Record<string, unknown>>) {
+      branch = structuredClone(entries);
+      return emit("session_tree", {});
+    },
+    compact(willRetry: boolean, id: string) {
+      const compactionEntry = { type: "compaction", id };
+      branch.push(compactionEntry);
+      return emit("session_compact", { willRetry, compactionEntry });
+    },
     async execute(params: Record<string, unknown>) {
       assert.ok(tool);
       const result = await tool.execute("test-call", params, undefined, undefined, ctx);
@@ -129,17 +146,26 @@ function createExtensionHarness() {
       });
       return result;
     },
-    emit: (event: string, payload: Record<string, unknown>) => handlers.get(event)?.(payload, ctx),
+    emit,
   };
 }
 
-test("ordinary compaction injects todo state from the next agent start", async () => {
+test("ordinary compaction injects live state only on its active branch", async () => {
+  const empty = createExtensionHarness();
+  empty.compact(false, "compaction-empty");
+  assert.equal(empty.emit("before_agent_start", {}), undefined);
+
   const harness = createExtensionHarness();
   await harness.execute({ action: "add", text: "Ship extension" });
-  await harness.emit("session_compact", { willRetry: false });
-  await harness.emit("session_tree", {});
-  await harness.execute({ action: "complete", id: 1 });
+  const branchBeforeCompaction = harness.branch();
+  harness.compact(false, "compaction-a");
+  const compactedBranch = harness.branch();
 
+  harness.switchBranch(branchBeforeCompaction);
+  assert.equal(harness.emit("before_agent_start", {}), undefined);
+
+  harness.switchBranch(compactedBranch);
+  await harness.execute({ action: "complete", id: 1 });
   assert.equal(harness.sent.length, 0);
   const result = (await harness.emit("before_agent_start", {})) as { message?: { content?: string } } | undefined;
   assert.equal(
@@ -152,10 +178,9 @@ test("ordinary compaction injects todo state from the next agent start", async (
 test("overflow compaction immediately steers the current todo state", async () => {
   const harness = createExtensionHarness();
   await harness.execute({ action: "add", text: "Retry turn" });
-  await harness.emit("session_compact", { willRetry: true });
+  harness.compact(true, "compaction-overflow");
 
   assert.equal(harness.sent.length, 1);
   assert.match(harness.sent[0]!.message.content, /TODO: 0 active, 1 pending, 0 completed/);
   assert.deepEqual(harness.sent[0]!.options, { deliverAs: "steer", triggerTurn: false });
-  assert.equal(await harness.emit("before_agent_start", {}), undefined);
 });
