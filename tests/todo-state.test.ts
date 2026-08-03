@@ -176,6 +176,10 @@ test("ordinary compaction injects live state only on its active branch", async (
 });
 
 test("overflow compaction immediately steers the current todo state", async () => {
+  const empty = createExtensionHarness();
+  empty.compact(true, "compaction-empty-overflow");
+  assert.equal(empty.sent.length, 0);
+
   const harness = createExtensionHarness();
   await harness.execute({ action: "add", text: "Retry turn" });
   harness.compact(true, "compaction-overflow");

@@ -104,7 +104,9 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   // Overflow compaction immediately retries the active run. Other compactions
   // are detected from the active branch when its next agent turn starts.
   pi.on("session_compact", (event) => {
-    if (event.willRetry) pi.sendMessage(todoContextMessage(), { deliverAs: "steer", triggerTurn: false });
+    if (event.willRetry && state.items.length > 0) {
+      pi.sendMessage(todoContextMessage(), { deliverAs: "steer", triggerTurn: false });
+    }
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
