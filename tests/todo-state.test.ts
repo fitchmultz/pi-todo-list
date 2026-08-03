@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import todoListExtension from "../extensions/todo-list.ts";
 import {
   addTodo,
   applyTodoBatch,
@@ -83,4 +84,66 @@ test("legacy done snapshots migrate to statuses", () => {
     migrated.items.map((item) => item.status),
     ["completed", "pending"],
   );
+});
+
+function createExtensionHarness() {
+  type Handler = (...args: unknown[]) => unknown;
+  type Tool = { execute: (...args: unknown[]) => Promise<unknown> };
+  const handlers = new Map<string, Handler>();
+  const sent: Array<{
+    message: { content: string };
+    options?: { deliverAs?: string; triggerTurn?: boolean };
+  }> = [];
+  const ctx = {
+    ui: {
+      theme: { fg: (_color: string, text: string) => text },
+      setWidget() {},
+      setStatus() {},
+    },
+  };
+  let tool: Tool | undefined;
+
+  todoListExtension({
+    on: (event: string, handler: Handler) => { handlers.set(event, handler); },
+    registerTool: (registered: Tool) => { tool = registered; },
+    registerCommand() {},
+    sendMessage: (message: { content: string }, options?: { deliverAs?: string; triggerTurn?: boolean }) => {
+      sent.push({ message, options });
+    },
+  } as never);
+
+  return {
+    sent,
+    execute(params: Record<string, unknown>) {
+      assert.ok(tool);
+      return tool.execute("test-call", params, undefined, undefined, ctx);
+    },
+    emit: (event: string, payload: Record<string, unknown>) => handlers.get(event)?.(payload, ctx),
+  };
+}
+
+test("ordinary compaction injects todo state from the next agent start", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Ship extension" });
+  await harness.emit("session_compact", { willRetry: false });
+  await harness.execute({ action: "complete", id: 1 });
+
+  assert.equal(harness.sent.length, 0);
+  const result = (await harness.emit("before_agent_start", {})) as { message?: { content?: string } } | undefined;
+  assert.equal(
+    result?.message?.content,
+    "[TODO LIST - state after compaction]\nTODO: 0 active, 0 pending, 1 completed\nKeep this list current with todo_list.",
+  );
+  assert.equal(await harness.emit("before_agent_start", {}), undefined);
+});
+
+test("overflow compaction immediately steers the current todo state", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Retry turn" });
+  await harness.emit("session_compact", { willRetry: true });
+
+  assert.equal(harness.sent.length, 1);
+  assert.match(harness.sent[0]!.message.content, /TODO: 0 active, 1 pending, 0 completed/);
+  assert.deepEqual(harness.sent[0]!.options, { deliverAs: "steer", triggerTurn: false });
+  assert.equal(await harness.emit("before_agent_start", {}), undefined);
 });

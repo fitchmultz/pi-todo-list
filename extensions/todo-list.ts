@@ -51,6 +51,17 @@ function restore(ctx: ExtensionContext): TodoState {
 export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
   let widgetVisible = true;
+  let refreshAfterCompaction = false;
+
+  const todoContextMessage = () => {
+    const remaining = formatTodoSnapshot(state);
+    if (remaining === "No todos") return;
+    return {
+      customType: "todo-list-context",
+      content: `[TODO LIST - state after compaction]\n${remaining}\nKeep this list current with todo_list.`,
+      display: false,
+    };
+  };
 
   const updateWidget = (ctx: ExtensionContext): void => {
     const ordered = orderedTodos(state, false);
@@ -78,27 +89,31 @@ export default function todoListExtension(pi: ExtensionAPI): void {
 
   const rehydrate = (ctx: ExtensionContext): void => {
     state = restore(ctx);
+    refreshAfterCompaction = false;
     updateWidget(ctx);
   };
 
   pi.on("session_start", (_event, ctx) => rehydrate(ctx));
   pi.on("session_tree", (_event, ctx) => rehydrate(ctx));
 
-  // Refresh model-visible state only at compaction boundaries. Normal tool results
-  // are append-only, preserving the provider-cacheable conversation prefix.
+  // Overflow compaction immediately retries the active run. Other compactions
+  // wait for the next agent start so later todo mutations cannot stale the snapshot.
   pi.on("session_compact", (event) => {
-    const remaining = formatTodoSnapshot(state);
-    if (remaining === "No todos") return;
-    pi.sendMessage(
-      {
-        customType: "todo-list-context",
-        content: `[TODO LIST - state after compaction]\n${remaining}\nKeep this list current with todo_list.`,
-        display: false,
-      },
-      // Overflow compaction is already retrying. Other compactions wait for the
-      // next user turn instead of causing an unsolicited model response.
-      { deliverAs: event.willRetry ? "steer" : "nextTurn", triggerTurn: false },
-    );
+    refreshAfterCompaction = false;
+    if (!event.willRetry) {
+      refreshAfterCompaction = state.items.length > 0;
+      return;
+    }
+
+    const message = todoContextMessage();
+    if (message) pi.sendMessage(message, { deliverAs: "steer", triggerTurn: false });
+  });
+
+  pi.on("before_agent_start", () => {
+    if (!refreshAfterCompaction) return;
+    refreshAfterCompaction = false;
+    const message = todoContextMessage();
+    return message ? { message } : undefined;
   });
 
   pi.registerTool({
