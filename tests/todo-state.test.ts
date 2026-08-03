@@ -94,12 +94,14 @@ function createExtensionHarness() {
     message: { content: string };
     options?: { deliverAs?: string; triggerTurn?: boolean };
   }> = [];
+  const branch: Array<Record<string, unknown>> = [];
   const ctx = {
     ui: {
       theme: { fg: (_color: string, text: string) => text },
       setWidget() {},
       setStatus() {},
     },
+    sessionManager: { getBranch: () => branch },
   };
   let tool: Tool | undefined;
 
@@ -114,9 +116,18 @@ function createExtensionHarness() {
 
   return {
     sent,
-    execute(params: Record<string, unknown>) {
+    async execute(params: Record<string, unknown>) {
       assert.ok(tool);
-      return tool.execute("test-call", params, undefined, undefined, ctx);
+      const result = await tool.execute("test-call", params, undefined, undefined, ctx);
+      branch.push({
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "todo_list",
+          details: (result as { details?: unknown }).details,
+        },
+      });
+      return result;
     },
     emit: (event: string, payload: Record<string, unknown>) => handlers.get(event)?.(payload, ctx),
   };
@@ -126,6 +137,7 @@ test("ordinary compaction injects todo state from the next agent start", async (
   const harness = createExtensionHarness();
   await harness.execute({ action: "add", text: "Ship extension" });
   await harness.emit("session_compact", { willRetry: false });
+  await harness.emit("session_tree", {});
   await harness.execute({ action: "complete", id: 1 });
 
   assert.equal(harness.sent.length, 0);

@@ -89,11 +89,13 @@ export default function todoListExtension(pi: ExtensionAPI): void {
 
   const rehydrate = (ctx: ExtensionContext): void => {
     state = restore(ctx);
-    refreshAfterCompaction = false;
     updateWidget(ctx);
   };
 
-  pi.on("session_start", (_event, ctx) => rehydrate(ctx));
+  pi.on("session_start", (_event, ctx) => {
+    refreshAfterCompaction = false;
+    rehydrate(ctx);
+  });
   pi.on("session_tree", (_event, ctx) => rehydrate(ctx));
 
   // Overflow compaction immediately retries the active run. Other compactions
