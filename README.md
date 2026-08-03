@@ -25,7 +25,7 @@ Then ask the agent to track the work. It will list todos when starting or resumi
 
 ## Caching
 
-The tool definition and system-prompt guidance are static. Mutations return only the change and status counts; the full state stays in persisted tool-result details. The extension injects one compact active/pending snapshot after compaction, preserving the provider-cacheable conversation prefix without repeatedly appending the whole list.
+The tool definition and system-prompt guidance are static. Mutations return only the change and status counts; the full state stays in persisted tool-result details. After compaction, the extension injects one compact active/pending snapshot when the active branch's retry or next agent turn starts, so later mutations cannot stale it and the provider-cacheable conversation prefix stays intact.
 
 ## State behavior
 
