@@ -1,4 +1,4 @@
-# pi-todo-list
+# @fitchmultz/pi-todo-list
 
 A small native Pi extension that gives agents a persistent, nested todo list.
 
@@ -14,6 +14,12 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 - Pi 0.84.0 or later
 
 ## Install
+
+```bash
+pi install git:github.com/fitchmultz/pi-todo-list@v0.2.0
+```
+
+For local development:
 
 ```bash
 pi install /absolute/path/to/pi-todo-list

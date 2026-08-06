@@ -89,26 +89,34 @@ test("legacy done snapshots migrate to statuses", () => {
 function createExtensionHarness() {
   type Handler = (...args: unknown[]) => unknown;
   type Tool = { execute: (...args: unknown[]) => Promise<unknown> };
+  type Command = { handler: (args: string, ctx: unknown) => Promise<void> };
   const handlers = new Map<string, Handler>();
   const sent: Array<{
     message: { content: string };
     options?: { deliverAs?: string; triggerTurn?: boolean };
   }> = [];
   let branch: Array<Record<string, unknown>> = [];
+  let hasUI = true;
+  const widgetUpdates: Array<string[] | undefined> = [];
+  const statusUpdates: Array<string | undefined> = [];
+  const notifications: string[] = [];
   const ctx = {
+    get hasUI() { return hasUI; },
     ui: {
       theme: { fg: (_color: string, text: string) => text },
-      setWidget() {},
-      setStatus() {},
+      setWidget(_key: string, content: string[] | undefined) { widgetUpdates.push(content); },
+      setStatus(_key: string, text: string | undefined) { statusUpdates.push(text); },
+      notify(message: string) { notifications.push(message); },
     },
     sessionManager: { getBranch: () => branch },
   };
   let tool: Tool | undefined;
+  let command: Command | undefined;
 
   todoListExtension({
     on: (event: string, handler: Handler) => { handlers.set(event, handler); },
     registerTool: (registered: Tool) => { tool = registered; },
-    registerCommand() {},
+    registerCommand: (_name: string, registered: Command) => { command = registered; },
     sendMessage: (message: { content: string }, options?: { deliverAs?: string; triggerTurn?: boolean }) => {
       sent.push({ message, options });
     },
@@ -123,7 +131,15 @@ function createExtensionHarness() {
 
   return {
     sent,
+    widgetUpdates,
+    statusUpdates,
+    notifications,
     branch: () => structuredClone(branch),
+    setHasUI(value: boolean) { hasUI = value; },
+    async runCommand(args: string) {
+      assert.ok(command);
+      await command.handler(args, ctx);
+    },
     switchBranch(entries: Array<Record<string, unknown>>) {
       branch = structuredClone(entries);
       return emit("session_tree", {});
@@ -149,6 +165,24 @@ function createExtensionHarness() {
     emit,
   };
 }
+
+test("UI updates and commands honor availability", async () => {
+  const interactive = createExtensionHarness();
+  await interactive.execute({ action: "add", text: "Visible todo" });
+  assert.match(interactive.statusUpdates.at(-1) ?? "", /todo 0 active · 1 pending/);
+  assert.match(interactive.widgetUpdates.at(-1)?.join("\n") ?? "", /#1 Visible todo/);
+  await interactive.runCommand("hide");
+  assert.equal(interactive.widgetUpdates.at(-1), undefined);
+  assert.equal(interactive.notifications.at(-1), "Todo widget hidden");
+
+  const headless = createExtensionHarness();
+  headless.setHasUI(false);
+  await headless.execute({ action: "add", text: "Headless todo" });
+  await headless.runCommand("show");
+  assert.equal(headless.widgetUpdates.length, 0);
+  assert.equal(headless.statusUpdates.length, 0);
+  assert.equal(headless.notifications.length, 0);
+});
 
 test("ordinary compaction injects live state only on its active branch", async () => {
   const empty = createExtensionHarness();
