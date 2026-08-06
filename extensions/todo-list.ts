@@ -70,6 +70,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   };
 
   const updateWidget = (ctx: ExtensionContext): void => {
+    if (!ctx.hasUI) return;
     const ordered = orderedTodos(state, false);
     if (ordered.length === 0) {
       ctx.ui.setWidget("todo-list", undefined);
@@ -119,8 +120,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     description: "Manage a persistent nested todo list with pending, in-progress, and completed items, including atomic batches",
     promptSnippet: "Track persistent pending, in-progress, and completed work across context compaction",
     promptGuidelines: [
-      "At the start or resumption of multi-step work, list todos. Start items before working, complete them after verification, and pause interrupted work.",
-      "Before claiming completion, reconcile outstanding todos. Keep items concise and batch related mutations into one call.",
+      "Use todo_list at the start or resumption of multi-step work. Start items before working, complete them after verification, and pause interrupted work.",
+      "Before claiming completion, use todo_list to reconcile outstanding items. Keep items concise and batch related mutations into one call.",
     ],
     parameters: Params,
     executionMode: "sequential",
@@ -154,6 +155,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   pi.registerCommand("todos", {
     description: "Show todos, or use /todos toggle|show|hide to control the widget",
     handler: async (args, ctx) => {
+      if (!ctx.hasUI) return;
       const command = args.trim();
       if (["toggle", "show", "hide"].includes(command)) {
         widgetVisible = command === "show" || (command === "toggle" && !widgetVisible);
