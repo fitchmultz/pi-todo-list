@@ -1,4 +1,4 @@
-# pi-todo-list
+# @fitchmultz/pi-todo-list
 
 A small native Pi extension that gives agents a persistent, nested todo list.
 
@@ -9,7 +9,17 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 - Session-local, branch-aware persistence through tool result details
 - Survives compaction, resume, fork, and tree navigation
 
+## Requirements
+
+- Pi 0.84.0 or later
+
 ## Install
+
+```bash
+pi install git:github.com/fitchmultz/pi-todo-list@v0.2.0
+```
+
+For local development:
 
 ```bash
 pi install /absolute/path/to/pi-todo-list
@@ -34,6 +44,7 @@ Each successful tool result stores a complete snapshot in `details`. Pi already 
 ## Development
 
 ```bash
-npm test
+npm ci
+npm run check
 pi --no-approve -e ./extensions/todo-list.ts --list-models
 ```
