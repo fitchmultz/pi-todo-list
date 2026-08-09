@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import todoListExtension from "../extensions/todo-list.ts";
 import {
   addTodo,
@@ -214,9 +215,9 @@ test("list pages and compaction context stay bounded", () => {
 });
 
 function createExtensionHarness() {
-  type Handler = (...args: unknown[]) => unknown;
-  type Tool = { execute: (...args: unknown[]) => Promise<unknown> };
-  type Command = { handler: (args: string, ctx: unknown) => Promise<void> };
+  type Handler = (...args: any[]) => any;
+  type Tool = { execute: (...args: any[]) => Promise<unknown> };
+  type Command = { handler: (args: string, ctx: any) => Promise<void> };
   const handlers = new Map<string, Handler>();
   const sent: Array<{
     message: { customType?: string; content: string; display?: boolean; details?: unknown };
@@ -240,14 +241,15 @@ function createExtensionHarness() {
   let tool: Tool | undefined;
   let command: Command | undefined;
 
-  todoListExtension({
+  const api = {
     on: (event: string, handler: Handler) => { handlers.set(event, handler); },
     registerTool: (registered: Tool) => { tool = registered; },
     registerCommand: (_name: string, registered: Command) => { command = registered; },
-    sendMessage: (message: { customType?: string; content: string; display?: boolean; details?: unknown }, options?: { deliverAs?: string; triggerTurn?: boolean }) => {
-      sent.push({ message, options });
+    sendMessage: (message, options) => {
+      sent.push({ message: message as (typeof sent)[number]["message"], options });
     },
-  } as never);
+  } satisfies Pick<ExtensionAPI, "on" | "registerTool" | "registerCommand" | "sendMessage">;
+  todoListExtension(api as unknown as ExtensionAPI);
 
   const emit = (event: string, payload: Record<string, unknown>) => {
     const result = handlers.get(event)?.(payload, ctx);
