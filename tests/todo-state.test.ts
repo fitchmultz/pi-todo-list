@@ -221,6 +221,7 @@ test("list pages and compaction context stay bounded", () => {
   assert.match(lastPage, /Showing 101-130 of 130/);
   assert.match(lastPage, /- #130 /);
   assert.match(formatTodoPage(state, Number.NaN, Number.NaN), /Showing 1-100 of 130/);
+  assert.match(formatTodoPage(state, 200), /No todos at offset 200; 130 total/);
 
   const context = formatTodoContext(state);
   assert.ok(context.length < 10_000);
@@ -324,6 +325,16 @@ test("UI updates and commands honor availability", async () => {
   await interactive.runCommand("gibberish");
   assert.equal(interactive.notifications.at(-1), "Usage: /todos [toggle|show|hide]");
 
+  const nested = createExtensionHarness();
+  await nested.execute({
+    action: "batch",
+    operations: Array.from({ length: 10 }, (_, index) => ({ action: "add", text: `Nested ${index + 1}`, ...(index === 0 ? {} : { parentId: index }) })),
+  });
+  const nestedWidget = nested.widgetUpdates.at(-1) ?? [];
+  assert.equal(nestedWidget.length, 9);
+  assert.match(nestedWidget[7] ?? "", /#8 Nested 8/);
+  assert.equal(nestedWidget[8], "… 2 more");
+
   const headless = createExtensionHarness();
   headless.setHasUI(false);
   await headless.execute({ action: "add", text: "Headless todo" });
@@ -373,10 +384,10 @@ test("compact mutation logs restore branches and skip malformed snapshots", asyn
 
 test("restore validates version-specific legacy snapshot items", async () => {
   const malformedSnapshots = [
-    { version: 1, state: { nextId: 2, items: [{ id: 1, text: "v1 with status", status: "pending" }] } },
-    { version: 1, state: { nextId: 2, items: [{ id: 1, text: "v1 conflict", done: false, status: "completed" }] } },
-    { version: 2, state: { nextId: 2, items: [{ id: 1, text: "v2 with done", done: false }] } },
-    { version: 2, state: { nextId: 2, items: [{ id: 1, text: "v2 missing status" }] } },
+    { version: 1, action: "add", state: { nextId: 2, items: [{ id: 1, text: "v1 with status", status: "pending" }] } },
+    { version: 1, action: "add", state: { nextId: 2, items: [{ id: 1, text: "v1 conflict", done: false, status: "completed" }] } },
+    { version: 2, action: "add", state: { nextId: 2, items: [{ id: 1, text: "v2 with done", done: false }] } },
+    { version: 2, action: "add", state: { nextId: 2, items: [{ id: 1, text: "v2 missing status" }] } },
   ];
 
   for (const details of malformedSnapshots) {
@@ -386,43 +397,66 @@ test("restore validates version-specific legacy snapshot items", async () => {
       { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After malformed snapshot" }] } } },
     ]);
     const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
-    assert.equal(restored.content[0]!.text, "No todos");
+    assert.match(restored.content[0]!.text, /Warning: Todo history was corrupt[\s\S]*No todos/);
     assert.match(harness.notifications.at(-1) ?? "", /restore stopped at corrupt session data/);
   }
 });
 
-test("restore stops at unknown persisted detail shapes", async () => {
-  const harness = createExtensionHarness();
-  harness.switchBranch([
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Before gap" }] } } },
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } },
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After harmless error" }] } } },
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 4, operations: [{ action: "add", text: "Unknown version" }] } } },
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After gap" }] } } },
-  ]);
+test("restore stops at conflicting and unknown persisted detail shapes", async () => {
+  const corruptDetails = [
+    { version: 3, read: "list", operations: [{ action: "add", text: "Conflicting detail" }] },
+    { version: 4, state: { nextId: 1, items: [] }, operations: [{ action: "add", text: "Conflicting recovery" }] },
+    { version: 99, operations: [{ action: "add", text: "Unknown version" }] },
+  ];
+  for (const details of corruptDetails) {
+    const harness = createExtensionHarness();
+    harness.switchBranch([
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Before gap" }] } } },
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } },
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After harmless error" }] } } },
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", details } },
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After gap" }] } } },
+    ]);
 
-  const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
-  assert.match(restored.content[0]!.text, /#1 Before gap/);
-  assert.match(restored.content[0]!.text, /#2 After harmless error/);
-  assert.doesNotMatch(restored.content[0]!.text, /After gap/);
-  assert.match(harness.notifications.at(-1) ?? "", /restore stopped at corrupt session data/);
+    const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+    assert.match(restored.content[0]!.text, /#1 Before gap/);
+    assert.match(restored.content[0]!.text, /#2 After harmless error/);
+    assert.doesNotMatch(restored.content[0]!.text, /After gap|Conflicting detail|Conflicting recovery|Unknown version/);
+    assert.match(harness.notifications.at(-1) ?? "", /restore stopped at corrupt session data/);
+  }
 });
 
 test("restore rolls back a partially corrupt batch", async () => {
   const harness = createExtensionHarness();
   harness.switchBranch([
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, state: { nextId: 2, items: [{ id: 1, text: "Checkpoint", status: "pending" }] } } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, action: "add", state: { nextId: 2, items: [{ id: 1, text: "Checkpoint", status: "pending" }] } } } },
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Before corrupt batch" }] } } },
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Partial" }, { action: "missing" }] } } },
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After corrupt batch" }] } } },
   ]);
 
-  const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
-  assert.match(restored.content[0]!.text, /#1 Checkpoint/);
-  assert.match(restored.content[0]!.text, /#2 Before corrupt batch/);
-  assert.doesNotMatch(restored.content[0]!.text, /Partial|After corrupt batch/);
-  const added = (await harness.execute({ action: "add", text: "Recovered" })) as { content: Array<{ text: string }> };
+  const added = (await harness.execute({ action: "add", text: "Recovered" })) as {
+    content: Array<{ text: string }>;
+    details: { version: number; state?: TodoState };
+  };
+  assert.match(added.content[0]!.text, /Warning: Todo history was corrupt/);
   assert.match(added.content[0]!.text, /Added #3: Recovered/);
+  assert.equal(added.details.version, 4);
+  assert.deepEqual(added.details.state?.items.map((item) => item.text), ["Checkpoint", "Before corrupt batch", "Recovered"]);
+
+  const healedBranch = harness.branch();
+  harness.switchBranch(healedBranch);
+  const resumed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(resumed.content[0]!.text, /#1 Checkpoint/);
+  assert.match(resumed.content[0]!.text, /#2 Before corrupt batch/);
+  assert.match(resumed.content[0]!.text, /#3 Recovered/);
+  assert.doesNotMatch(resumed.content[0]!.text, /Warning: Todo history was corrupt|Partial|After corrupt batch/);
+
+  await harness.execute({ action: "add", text: "After healing" });
+  const durableBranch = harness.branch();
+  harness.switchBranch(durableBranch);
+  const durable = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(durable.content[0]!.text, /#4 After healing/);
 });
 
 test("add-only batch-log restore avoids per-log state clones", async () => {

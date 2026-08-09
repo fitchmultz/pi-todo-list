@@ -21,13 +21,20 @@ import {
 const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
 const TODO_CONTEXT_TYPE = "todo-list-context";
 const DETAILS_VERSION = 3;
+const RECOVERY_VERSION = 4;
 const BATCH_OPERATION_LIMIT = 100;
 const WIDGET_LIMIT = 8;
 
-interface SnapshotDetails {
+interface LegacySnapshotDetails {
   version: 1 | 2;
+  action: string;
   state: unknown;
 }
+interface RecoveryDetails {
+  version: 4;
+  state: unknown;
+}
+type SnapshotDetails = LegacySnapshotDetails | RecoveryDetails;
 interface MutationDetails {
   version: 3;
   operations: TodoMutation[];
@@ -55,35 +62,43 @@ const Params = Type.Object({
 
 const NOT_TODO_RESULT = Symbol("not-todo-result");
 const NO_TODO_CHANGE = Symbol("no-todo-change");
+type BranchEntry = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[number];
 
-function entryDetails(entry: unknown): unknown {
-  if (!entry || typeof entry !== "object") return NOT_TODO_RESULT;
-  const candidate = entry as {
-    type?: string;
-    message?: { role?: string; toolName?: string; details?: unknown; isError?: boolean };
-  };
-  if (candidate.type === "message" && candidate.message?.role === "toolResult" && candidate.message.toolName === "todo_list") {
-    return candidate.message.isError ? NO_TODO_CHANGE : candidate.message.details;
+function entryDetails(entry: BranchEntry): unknown {
+  if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "todo_list") {
+    return entry.message.isError ? NO_TODO_CHANGE : entry.message.details;
   }
   return NOT_TODO_RESULT;
 }
 
+function hasExactKeys(value: object, keys: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
 function isSnapshot(details: unknown): details is SnapshotDetails {
   if (!details || typeof details !== "object") return false;
-  const candidate = details as { version?: unknown };
-  return (candidate.version === 1 || candidate.version === 2) && "state" in details;
+  const candidate = details as { version?: unknown; action?: unknown };
+  if (candidate.version === RECOVERY_VERSION) return hasExactKeys(details, ["version", "state"]);
+  return (candidate.version === 1 || candidate.version === 2)
+    && typeof candidate.action === "string"
+    && hasExactKeys(details, ["version", "action", "state"]);
 }
 
 function isMutationLog(details: unknown): details is MutationDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; operations?: unknown };
-  return candidate.version === DETAILS_VERSION && Array.isArray(candidate.operations) && candidate.operations.length > 0 && candidate.operations.length <= BATCH_OPERATION_LIMIT;
+  return candidate.version === DETAILS_VERSION
+    && Array.isArray(candidate.operations)
+    && candidate.operations.length > 0
+    && candidate.operations.length <= BATCH_OPERATION_LIMIT
+    && hasExactKeys(details, ["version", "operations"]);
 }
 
 function isReadMarker(details: unknown): details is ReadDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; read?: unknown };
-  return candidate.version === DETAILS_VERSION && candidate.read === "list";
+  return candidate.version === DETAILS_VERSION && candidate.read === "list" && hasExactKeys(details, ["version", "read"]);
 }
 
 function validatedSnapshot(details: SnapshotDetails): TodoState | undefined {
@@ -108,14 +123,14 @@ function replayLog(state: TodoState, operations: TodoMutation[]): void {
   for (const operation of operations) applyTodoMutation(state, operation);
 }
 
-function restore(ctx: ExtensionContext): TodoState {
+function restore(ctx: ExtensionContext): { state: TodoState; recoveryNeeded: boolean } {
   const branch = ctx.sessionManager.getBranch();
   let restored = emptyState();
   let checkpointIndex = -1;
   let restoreStopped = false;
 
   for (let index = branch.length - 1; index >= 0; index -= 1) {
-    const details = entryDetails(branch[index]);
+    const details = entryDetails(branch[index]!);
     if (!isSnapshot(details)) continue;
     const checkpoint = validatedSnapshot(details);
     if (!checkpoint) {
@@ -130,7 +145,7 @@ function restore(ctx: ExtensionContext): TodoState {
   const base = cloneState(restored);
   const appliedLogs: TodoMutation[][] = [];
   for (let index = checkpointIndex + 1; index < branch.length; index += 1) {
-    const details = entryDetails(branch[index]);
+    const details = entryDetails(branch[index]!);
     if (details === NOT_TODO_RESULT || details === NO_TODO_CHANGE) continue;
     if (isReadMarker(details)) continue;
     if (!isMutationLog(details)) {
@@ -153,11 +168,12 @@ function restore(ctx: ExtensionContext): TodoState {
   }
 
   if (restoreStopped && ctx.hasUI) ctx.ui.notify("Todo restore stopped at corrupt session data; later changes were not replayed.", "warning");
-  return restored;
+  return { state: restored, recoveryNeeded: restoreStopped };
 }
 
 export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
+  let recoveryNeeded = false;
   let widgetVisible = true;
 
   const todoContextMessage = () => ({
@@ -195,14 +211,16 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     const visible = orderedTodos(state, false, WIDGET_LIMIT);
     const lines = visible.map(({ item, depth }) => {
       const active = item.status === "in_progress";
-      return `${"  ".repeat(Math.min(depth, WIDGET_LIMIT))}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
+      return `${"  ".repeat(depth)}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
     });
     if (openCount > visible.length) lines.push(ctx.ui.theme.fg("dim", `… ${openCount - visible.length} more`));
     ctx.ui.setWidget("todo-list", lines);
   };
 
   const rehydrate = (ctx: ExtensionContext): void => {
-    state = restore(ctx);
+    const restored = restore(ctx);
+    state = restored.state;
+    recoveryNeeded = restored.recoveryNeeded;
     updateWidget(ctx);
   };
 
@@ -238,7 +256,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       let message: string;
-      let details: MutationDetails | ReadDetails;
+      let details: MutationDetails | ReadDetails | RecoveryDetails;
       if (params.action === "list") {
         message = formatTodoPage(state, params.offset ?? 0, params.limit ?? LIST_PAGE_LIMIT);
         details = { version: DETAILS_VERSION, read: "list" };
@@ -259,8 +277,16 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       }
 
       updateWidget(ctx);
-      const content = params.action === "list" ? message : `${message}\n${formatTodoCounts(state)}`;
-      return { content: [{ type: "text", text: content }], details };
+      const recovering = recoveryNeeded;
+      if (recovering) {
+        details = { version: RECOVERY_VERSION, state: cloneState(state) };
+        recoveryNeeded = false;
+      }
+      const result = params.action === "list" ? message : `${message}\n${formatTodoCounts(state)}`;
+      const notice = recovering
+        ? "Warning: Todo history was corrupt; later changes were not replayed. Saved the current list as a recovery checkpoint.\n"
+        : "";
+      return { content: [{ type: "text", text: `${notice}${result}` }], details };
     },
   });
 

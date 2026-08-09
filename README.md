@@ -41,7 +41,9 @@ The tool definition and system-prompt guidance are static. Mutations return only
 
 ## State behavior
 
-Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume replays those mutations on the active branch, using legacy version 1 and 2 snapshots when present. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
+Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume replays those mutations on the active branch, using legacy version 1 and 2 snapshots when present. If restore encounters corrupt history, it warns, preserves the contiguous valid state, and writes one recovery checkpoint on the next successful `todo_list` call. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
+
+Do not reopen a version 0.3 session with an older extension release; older versions do not understand mutation logs.
 
 ## Development
 
