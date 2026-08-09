@@ -21,11 +21,12 @@ import {
 const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
 const TODO_CONTEXT_TYPE = "todo-list-context";
 const DETAILS_VERSION = 3;
+const BATCH_OPERATION_LIMIT = 100;
 const WIDGET_LIMIT = 8;
 
 interface SnapshotDetails {
   version: 1 | 2;
-  state: TodoState;
+  state: unknown;
 }
 interface MutationDetails {
   version: 3;
@@ -47,7 +48,7 @@ const Params = Type.Object({
   id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID for update, move, start, pause, complete, reopen, or remove" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT, description: "Concise todo text for add or update" })),
   parentId: Type.Optional(Type.Integer({ minimum: 1, description: "Parent todo ID for add or move; omit on move to make it top-level" })),
-  operations: Type.Optional(Type.Array(Mutation, { minItems: 1, maxItems: 100, description: "Required for batch. Ordered mutations applied atomically" })),
+  operations: Type.Optional(Type.Array(Mutation, { minItems: 1, maxItems: BATCH_OPERATION_LIMIT, description: "Required for batch. Ordered mutations applied atomically" })),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based list offset" })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: LIST_PAGE_LIMIT, description: `List page size (default and maximum ${LIST_PAGE_LIMIT})` })),
 });
@@ -55,7 +56,7 @@ const Params = Type.Object({
 const NOT_TODO_RESULT = Symbol("not-todo-result");
 const NO_TODO_CHANGE = Symbol("no-todo-change");
 
-function entryDetails(entry: unknown): unknown | typeof NOT_TODO_RESULT | typeof NO_TODO_CHANGE {
+function entryDetails(entry: unknown): unknown {
   if (!entry || typeof entry !== "object") return NOT_TODO_RESULT;
   const candidate = entry as {
     type?: string;
@@ -76,7 +77,7 @@ function isSnapshot(details: unknown): details is SnapshotDetails {
 function isMutationLog(details: unknown): details is MutationDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; operations?: unknown };
-  return candidate.version === DETAILS_VERSION && Array.isArray(candidate.operations) && candidate.operations.length > 0 && candidate.operations.length <= 100;
+  return candidate.version === DETAILS_VERSION && Array.isArray(candidate.operations) && candidate.operations.length > 0 && candidate.operations.length <= BATCH_OPERATION_LIMIT;
 }
 
 function isReadMarker(details: unknown): details is ReadDetails {
@@ -86,11 +87,25 @@ function isReadMarker(details: unknown): details is ReadDetails {
 }
 
 function validatedSnapshot(details: SnapshotDetails): TodoState | undefined {
+  if (!details.state || typeof details.state !== "object") return undefined;
+  const state = details.state as { items?: unknown };
+  if (!Array.isArray(state.items)) return undefined;
+  for (const value of state.items) {
+    if (!value || typeof value !== "object") return undefined;
+    const item = value as Record<string, unknown>;
+    if (details.version === 1) {
+      if (!Object.hasOwn(item, "done") || typeof item.done !== "boolean" || "status" in item) return undefined;
+    } else if (!Object.hasOwn(item, "status") || typeof item.status !== "string" || "done" in item) return undefined;
+  }
   try {
-    return cloneState(details.state);
+    return cloneState(details.state as TodoState);
   } catch {
     return undefined;
   }
+}
+
+function replayLog(state: TodoState, operations: TodoMutation[]): void {
+  for (const operation of operations) applyTodoMutation(state, operation);
 }
 
 function restore(ctx: ExtensionContext): TodoState {
@@ -123,12 +138,14 @@ function restore(ctx: ExtensionContext): TodoState {
       break;
     }
     try {
-      for (const operation of details.operations) applyTodoMutation(restored, operation);
+      replayLog(restored, details.operations);
       appliedLogs.push(details.operations);
     } catch {
-      restored = cloneState(base);
-      for (const operations of appliedLogs) {
-        for (const operation of operations) applyTodoMutation(restored, operation);
+      try {
+        restored = cloneState(base);
+        for (const operations of appliedLogs) replayLog(restored, operations);
+      } catch {
+        restored = emptyState();
       }
       restoreStopped = true;
       break;
@@ -178,7 +195,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     const visible = orderedTodos(state, false, WIDGET_LIMIT);
     const lines = visible.map(({ item, depth }) => {
       const active = item.status === "in_progress";
-      return `${"  ".repeat(depth)}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
+      return `${"  ".repeat(Math.min(depth, WIDGET_LIMIT))}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
     });
     if (openCount > visible.length) lines.push(ctx.ui.theme.fg("dim", `… ${openCount - visible.length} more`));
     ctx.ui.setWidget("todo-list", lines);

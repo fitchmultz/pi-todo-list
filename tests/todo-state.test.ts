@@ -79,7 +79,8 @@ test("batch mutations are ordered and atomic", () => {
 
 test("todo text is bounded and safe to render", () => {
   const state = emptyState();
-  const todo = addTodo(state, "\u001b[31mred\u001b[0m\n\u202eline");
+  const bidiControls = "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+  const todo = addTodo(state, `\u001b[31mred\u001b[0m\n${bidiControls}line`);
   assert.equal(todo.text, "[31mred [0m line");
   assert.throws(() => addTodo(state, "x".repeat(TODO_TEXT_LIMIT + 1)), /cannot exceed 240 characters/);
   assert.throws(
@@ -130,6 +131,14 @@ test("malformed snapshots and ancestry fail without partial mutations", () => {
   assert.throws(
     () => cloneState({ nextId: 2, items: [{ id: 1, text: "Bad status", status: "paused" as never }] }),
     /Invalid status/,
+  );
+  assert.throws(
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Missing status" }] } as unknown as TodoState),
+    /exactly one status field/,
+  );
+  assert.throws(
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Conflicting status", status: "pending", done: true }] } as unknown as TodoState),
+    /exactly one status field/,
   );
   assert.throws(
     () => cloneState({ nextId: 3, items: [{ id: 1, text: "Done parent", status: "completed" }, { id: 2, text: "Open child", status: "pending", parentId: 1 }] }),
@@ -346,19 +355,40 @@ test("compact mutation logs restore branches and skip malformed snapshots", asyn
   const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
   assert.match(restored.content[0]!.text, /#1 Persist me/);
 
-  const legacyState = { nextId: 2, items: [{ id: 1, text: "Legacy", status: "pending" }] };
+  const versionOneState = { nextId: 2, items: [{ id: 1, text: "Legacy v1", done: false }] };
   harness.switchBranch([
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 1, action: "add", state: legacyState } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 1, action: "add", state: versionOneState } } },
   ]);
   const versionOne = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
-  assert.match(versionOne.content[0]!.text, /#1 Legacy/);
+  assert.match(versionOne.content[0]!.text, /#1 Legacy v1/);
 
+  const legacyState = { nextId: 2, items: [{ id: 1, text: "Legacy v2", status: "pending" }] };
   harness.switchBranch([
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, action: "add", state: legacyState } } },
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, action: "add", state: null } } },
   ]);
   const legacy = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
-  assert.match(legacy.content[0]!.text, /#1 Legacy/);
+  assert.match(legacy.content[0]!.text, /#1 Legacy v2/);
+});
+
+test("restore validates version-specific legacy snapshot items", async () => {
+  const malformedSnapshots = [
+    { version: 1, state: { nextId: 2, items: [{ id: 1, text: "v1 with status", status: "pending" }] } },
+    { version: 1, state: { nextId: 2, items: [{ id: 1, text: "v1 conflict", done: false, status: "completed" }] } },
+    { version: 2, state: { nextId: 2, items: [{ id: 1, text: "v2 with done", done: false }] } },
+    { version: 2, state: { nextId: 2, items: [{ id: 1, text: "v2 missing status" }] } },
+  ];
+
+  for (const details of malformedSnapshots) {
+    const harness = createExtensionHarness();
+    harness.switchBranch([
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", details } },
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After malformed snapshot" }] } } },
+    ]);
+    const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+    assert.equal(restored.content[0]!.text, "No todos");
+    assert.match(harness.notifications.at(-1) ?? "", /restore stopped at corrupt session data/);
+  }
 });
 
 test("restore stops at unknown persisted detail shapes", async () => {
@@ -395,7 +425,7 @@ test("restore rolls back a partially corrupt batch", async () => {
   assert.match(added.content[0]!.text, /Added #3: Recovered/);
 });
 
-test("batch-log restore scales near-linearly", async () => {
+test("add-only batch-log restore avoids per-log state clones", async () => {
   const makeBranch = (size: number) => Array.from({ length: size / 2 }, (_, index) => ({
     type: "message",
     message: {
@@ -418,7 +448,7 @@ test("batch-log restore scales near-linearly", async () => {
   const largeRuns = Array.from({ length: 3 }, () => measure(largeBranch));
   const large = median(largeRuns.map((run) => run.duration));
 
-  assert.ok(large < small * 10 + 10, `Expected near-linear restore scaling, got ${small.toFixed(2)}ms -> ${large.toFixed(2)}ms`);
+  assert.ok(large < small * 6, `Expected add-only restore to scale near-linearly, got ${small.toFixed(2)}ms -> ${large.toFixed(2)}ms`);
   const restored = (await largeRuns[0]!.harness.execute({ action: "list", offset: 3_900 })) as { content: Array<{ text: string }> };
   assert.match(restored.content[0]!.text, /#4000 Todo 4000/);
 });

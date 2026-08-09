@@ -32,7 +32,7 @@ export interface TodoMutation {
 }
 
 const TODO_STATUSES: readonly TodoStatus[] = ["pending", "in_progress", "completed"];
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g;
+const CONTROL_CHARACTERS = /(?:[\u0000-\u001f\u007f-\u009f]|\p{Bidi_Control})+/gu;
 const CONTEXT_ITEMS_PER_STATUS = 25;
 const CONTEXT_TEXT_LENGTH = 160;
 export const LIST_PAGE_LIMIT = 100;
@@ -56,12 +56,17 @@ export function cloneState(state: TodoState): TodoState {
       throw new Error(`Invalid parent for todo #${raw.id}`);
     }
 
+    const hasStatus = Object.hasOwn(raw, "status");
+    const hasDone = Object.hasOwn(raw, "done");
+    if (hasStatus === hasDone) throw new Error(`Todo #${raw.id} must have exactly one status field`);
     let status: TodoStatus;
-    if (TODO_STATUSES.includes(raw.status)) status = raw.status;
-    else if (raw.status === undefined) {
-      if (raw.done !== undefined && typeof raw.done !== "boolean") throw new Error(`Invalid done flag for todo #${raw.id}`);
-      status = raw.done === true ? "completed" : "pending";
-    } else throw new Error(`Invalid status for todo #${raw.id}`);
+    if (hasStatus) {
+      if (!TODO_STATUSES.includes(raw.status)) throw new Error(`Invalid status for todo #${raw.id}`);
+      status = raw.status;
+    } else {
+      if (typeof raw.done !== "boolean") throw new Error(`Invalid done flag for todo #${raw.id}`);
+      status = raw.done ? "completed" : "pending";
+    }
 
     ids.add(raw.id);
     return { id: raw.id, text, status, ...(raw.parentId === undefined ? {} : { parentId: raw.parentId }) };
@@ -129,10 +134,11 @@ function descendants(state: TodoState, id: number): Set<number> {
 }
 
 function ancestorChain(state: TodoState, target: TodoItem): TodoItem[] {
+  if (target.parentId === undefined) return [];
   const byId = new Map(state.items.map((todo) => [todo.id, todo]));
   const seen = new Set([target.id]);
   const ancestors: TodoItem[] = [];
-  let parentId = target.parentId;
+  let parentId: number | undefined = target.parentId;
   while (parentId !== undefined) {
     if (seen.has(parentId)) throw new Error(`Todo hierarchy contains a cycle at #${parentId}`);
     seen.add(parentId);
