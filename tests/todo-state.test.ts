@@ -10,8 +10,6 @@ import {
   emptyState,
   formatTodoContext,
   formatTodoPage,
-  formatTodoSnapshot,
-  formatTodos,
   moveTodo,
   orderedTodos,
   pauseTodo,
@@ -19,6 +17,7 @@ import {
   reopenTodo,
   startTodo,
   todoCounts,
+  TODO_TEXT_LIMIT,
   type TodoState,
   updateTodo,
 } from "../extensions/todo-state.ts";
@@ -32,10 +31,10 @@ test("nested todo lifecycle", () => {
   updateTodo(state, child.id, "Run validation");
 
   startTodo(state, child.id);
-  assert.equal(formatTodos(state), "- #1 Ship extension\n  > #2 Run validation");
+  assert.equal(formatTodoPage(state), "TODO: 1 active, 1 pending, 0 completed\n- #1 Ship extension\n  > #2 Run validation");
   pauseTodo(state, child.id);
   assert.equal(completeTodo(state, parent.id), 2);
-  assert.equal(formatTodoSnapshot(state), "TODO: 0 active, 0 pending, 2 completed");
+  assert.equal(formatTodoContext(state), "TODO: 0 active, 0 pending, 2 completed");
   assert.equal(reopenTodo(state, child.id), 1);
   assert.equal(parent.status, "pending");
   assert.equal(reopenTodo(state, parent.id), 2);
@@ -66,7 +65,7 @@ test("batch mutations are ordered and atomic", () => {
     ]),
     ["Added #1: First", "Added #2: Second", "Updated #2: Updated second", "Started #2: Updated second"],
   );
-  assert.equal(formatTodoSnapshot(state, true), "TODO: 1 active, 1 pending, 0 completed\n- #1 First\n  > #2 Updated second");
+  assert.equal(formatTodoPage(state), "TODO: 1 active, 1 pending, 0 completed\n- #1 First\n  > #2 Updated second");
 
   const before = cloneState(state);
   assert.throws(
@@ -74,6 +73,17 @@ test("batch mutations are ordered and atomic", () => {
     /not found/,
   );
   assert.deepEqual(state, before);
+});
+
+test("todo text is bounded and safe to render", () => {
+  const state = emptyState();
+  const todo = addTodo(state, "\u001b[31mred\u001b[0m\nline");
+  assert.equal(todo.text, "[31mred [0m line");
+  assert.throws(() => addTodo(state, "x".repeat(TODO_TEXT_LIMIT + 1)), /cannot exceed 240 characters/);
+  assert.throws(
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "x".repeat(TODO_TEXT_LIMIT + 1), status: "pending" }] }),
+    /cannot exceed 240 characters/,
+  );
 });
 
 test("legacy done snapshots migrate to statuses", () => {
@@ -89,6 +99,12 @@ test("legacy done snapshots migrate to statuses", () => {
     ["completed", "pending"],
   );
   assert.equal(migrated.nextId, 3);
+});
+
+test("exhausted todo IDs fail without mutating state", () => {
+  const exhausted = cloneState({ nextId: Number.MAX_SAFE_INTEGER, items: [] });
+  assert.throws(() => addTodo(exhausted, "Never added"), /id limit reached/);
+  assert.deepEqual(exhausted, { nextId: Number.MAX_SAFE_INTEGER, items: [] });
 });
 
 test("malformed snapshots and ancestry fail without partial mutations", () => {
@@ -145,6 +161,21 @@ test("deep tree operations are iterative", () => {
   assert.deepEqual(todoCounts(state), { pending: 0, inProgress: 0, completed: size });
   startTodo(state, size);
   assert.deepEqual(todoCounts(state), { pending: size - 1, inProgress: 1, completed: 0 });
+});
+
+test("wide tree operations avoid argument-count limits", () => {
+  const size = 150_000;
+  const state: TodoState = {
+    nextId: size + 1,
+    items: Array.from({ length: size }, (_, index) => ({
+      id: index + 1,
+      text: `Todo ${index + 1}`,
+      status: "pending",
+      ...(index === 0 ? {} : { parentId: 1 }),
+    })),
+  };
+
+  assert.equal(completeTodo(state, 1), size);
 });
 
 test("batch errors identify the operation and preserve state", () => {
@@ -309,6 +340,12 @@ test("compact mutation logs restore branches and skip malformed snapshots", asyn
 
   const legacyState = { nextId: 2, items: [{ id: 1, text: "Legacy", status: "pending" }] };
   harness.switchBranch([
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 1, action: "add", state: legacyState } } },
+  ]);
+  const versionOne = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(versionOne.content[0]!.text, /#1 Legacy/);
+
+  harness.switchBranch([
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, action: "add", state: legacyState } } },
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, action: "add", state: null } } },
   ]);
@@ -346,11 +383,13 @@ test("malformed compaction context is replaced", async () => {
   assert.ok((harness.emit("before_agent_start", {}) as { message?: unknown } | undefined)?.message);
 });
 
-test("compaction messages checkpoint later mutation logs", async () => {
+test("compaction context stays bounded without duplicating state", async () => {
   const harness = createExtensionHarness();
   await harness.execute({ action: "add", text: "Before checkpoint" });
   harness.compact(false, "checkpoint");
-  assert.ok((harness.emit("before_agent_start", {}) as { message?: unknown } | undefined)?.message);
+  const context = (await harness.emit("before_agent_start", {})) as { message?: { details?: unknown } } | undefined;
+  assert.ok(context?.message);
+  assert.equal(context.message.details, undefined);
   await harness.execute({ action: "add", text: "After checkpoint" });
   const branch = harness.branch();
 
@@ -386,7 +425,7 @@ test("ordinary compaction injects live state only on its active branch", async (
   assert.equal(await harness.emit("before_agent_start", {}), undefined);
 });
 
-test("compaction checkpoints an emptied list", async () => {
+test("compaction refreshes an emptied list", async () => {
   const harness = createExtensionHarness();
   await harness.execute({ action: "add", text: "Temporary" });
   await harness.execute({ action: "remove", id: 1 });

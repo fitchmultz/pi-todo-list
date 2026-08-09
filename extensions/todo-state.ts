@@ -32,9 +32,11 @@ export interface TodoMutation {
 }
 
 const TODO_STATUSES: readonly TodoStatus[] = ["pending", "in_progress", "completed"];
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const CONTEXT_ITEMS_PER_STATUS = 25;
 const CONTEXT_TEXT_LENGTH = 160;
-const LIST_PAGE_LIMIT = 100;
+export const LIST_PAGE_LIMIT = 100;
+export const TODO_TEXT_LIMIT = 240;
 const MAX_RENDER_DEPTH = 12;
 
 export const emptyState = (): TodoState => ({ items: [], nextId: 1 });
@@ -48,7 +50,8 @@ export function cloneState(state: TodoState): TodoState {
     if (!value || typeof value !== "object") throw new Error("Invalid todo item");
     const raw = value as TodoItem & { done?: boolean };
     if (!Number.isSafeInteger(raw.id) || raw.id < 1 || ids.has(raw.id)) throw new Error(`Invalid or duplicate todo id: ${String(raw.id)}`);
-    if (typeof raw.text !== "string" || !raw.text.trim()) throw new Error(`Invalid text for todo #${raw.id}`);
+    if (typeof raw.text !== "string") throw new Error(`Invalid text for todo #${raw.id}`);
+    const text = concise(raw.text);
     if (raw.parentId !== undefined && (!Number.isSafeInteger(raw.parentId) || raw.parentId < 1)) {
       throw new Error(`Invalid parent for todo #${raw.id}`);
     }
@@ -59,7 +62,7 @@ export function cloneState(state: TodoState): TodoState {
     else throw new Error(`Invalid status for todo #${raw.id}`);
 
     ids.add(raw.id);
-    return { id: raw.id, text: raw.text.trim(), status, ...(raw.parentId === undefined ? {} : { parentId: raw.parentId }) };
+    return { id: raw.id, text, status, ...(raw.parentId === undefined ? {} : { parentId: raw.parentId }) };
   });
 
   const byId = new Map(items.map((todo) => [todo.id, todo]));
@@ -97,8 +100,9 @@ function item(state: TodoState, id: number): TodoItem {
 }
 
 function concise(text: string): string {
-  const value = text.trim();
+  const value = text.replace(CONTROL_CHARACTERS, " ").trim();
   if (!value) throw new Error("Todo text cannot be empty");
+  if ([...value].length > TODO_TEXT_LIMIT) throw new Error(`Todo text cannot exceed ${TODO_TEXT_LIMIT} characters`);
   return value;
 }
 
@@ -117,7 +121,7 @@ function descendants(state: TodoState, id: number): Set<number> {
     const current = stack.pop()!;
     if (ids.has(current)) continue;
     ids.add(current);
-    stack.push(...(byParent.get(current) ?? []));
+    for (const child of byParent.get(current) ?? []) stack.push(child);
   }
   return ids;
 }
@@ -145,6 +149,7 @@ function reopenCompleted(ancestors: TodoItem[]): void {
 export function addTodo(state: TodoState, text: string, parentId?: number): TodoItem {
   const value = concise(text);
   if (parentId !== undefined && item(state, parentId).status === "completed") throw new Error("Cannot add under a completed todo");
+  if (!Number.isSafeInteger(state.nextId) || state.nextId < 1 || state.nextId >= Number.MAX_SAFE_INTEGER) throw new Error("Todo id limit reached");
   const added = { id: state.nextId++, text: value, status: "pending" as const, ...(parentId === undefined ? {} : { parentId }) };
   state.items.push(added);
   return added;
@@ -342,17 +347,6 @@ function formatRows(rows: Array<{ item: TodoItem; depth: number }>): string {
     .join("\n");
 }
 
-export function formatTodos(state: TodoState, includeCompleted = true): string {
-  const rows = orderedTodos(state, includeCompleted);
-  return rows.length > 0 ? formatRows(rows) : "No todos";
-}
-
-export function formatTodoSnapshot(state: TodoState, includeCompleted = false): string {
-  if (state.items.length === 0) return "No todos";
-  const rows = formatTodos(state, includeCompleted);
-  return rows === "No todos" ? formatTodoCounts(state) : `${formatTodoCounts(state)}\n${rows}`;
-}
-
 export function formatTodoPage(state: TodoState, offset = 0, limit = LIST_PAGE_LIMIT): string {
   if (state.items.length === 0) return "No todos";
   const start = Math.max(0, Math.floor(offset));
@@ -387,7 +381,7 @@ export function formatTodoContext(state: TodoState): string {
   const hiddenPending = counts.pending - Math.min(counts.pending, CONTEXT_ITEMS_PER_STATUS);
   if (hiddenActive + hiddenPending > 0) {
     const hidden = [hiddenActive > 0 ? `${hiddenActive} active` : "", hiddenPending > 0 ? `${hiddenPending} pending` : ""].filter(Boolean).join(" and ");
-    lines.push(`… ${hidden} not shown; use todo_list list with offset to continue`);
+    lines.push(`… ${hidden} not shown; use todo_list list to page through all items`);
   }
   return `${formatTodoCounts(state)}\n${lines.join("\n")}`;
 }

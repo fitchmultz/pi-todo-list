@@ -41,7 +41,7 @@ The tool definition and system-prompt guidance are static. Mutations return only
 
 ## State behavior
 
-Successful mutations persist as a compact operation log in tool-result `details`. Compaction context messages provide occasional full-state checkpoints, and resume replays only mutations after the latest valid checkpoint. This keeps session history linear while preserving branch-aware restore without an extra database or project file. Version 1 and 2 snapshots remain readable. A new session starts with an empty list.
+Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume replays those mutations on the active branch, using legacy version 1 and 2 snapshots when present. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
 
 ## Development
 

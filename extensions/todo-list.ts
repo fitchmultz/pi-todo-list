@@ -11,7 +11,9 @@ import {
   formatTodoPage,
   orderedTodos,
   todoCounts,
+  LIST_PAGE_LIMIT,
   TODO_MUTATIONS,
+  TODO_TEXT_LIMIT,
   type TodoMutation,
   type TodoState,
 } from "./todo-state.ts";
@@ -19,10 +21,8 @@ import {
 const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
 const TODO_CONTEXT_TYPE = "todo-list-context";
 const DETAILS_VERSION = 3;
-const LIST_LIMIT = 100;
 const WIDGET_LIMIT = 8;
 
-type Action = (typeof ACTIONS)[number];
 interface SnapshotDetails {
   version: 1 | 2 | 3;
   state: TodoState;
@@ -36,18 +36,18 @@ type TodoDetails = SnapshotDetails | MutationDetails;
 const Mutation = Type.Object({
   action: StringEnum(TODO_MUTATIONS),
   id: Type.Optional(Type.Integer({ minimum: 1 })),
-  text: Type.Optional(Type.String({ minLength: 1, maxLength: 240 })),
+  text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT })),
   parentId: Type.Optional(Type.Integer({ minimum: 1 })),
 });
 
 const Params = Type.Object({
   action: StringEnum(ACTIONS),
   id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID for update, move, start, pause, complete, reopen, or remove" })),
-  text: Type.Optional(Type.String({ minLength: 1, maxLength: 240, description: "Concise todo text for add or update" })),
+  text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT, description: "Concise todo text for add or update" })),
   parentId: Type.Optional(Type.Integer({ minimum: 1, description: "Parent todo ID for add or move; omit on move to make it top-level" })),
   operations: Type.Optional(Type.Array(Mutation, { minItems: 1, maxItems: 100, description: "Required for batch. Ordered mutations applied atomically" })),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based list offset" })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: LIST_LIMIT, description: `List page size (default and maximum ${LIST_LIMIT})` })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: LIST_PAGE_LIMIT, description: `List page size (default and maximum ${LIST_PAGE_LIMIT})` })),
 });
 
 function entryDetails(entry: unknown): TodoDetails | undefined {
@@ -75,21 +75,26 @@ function isMutationLog(details: TodoDetails | undefined): details is MutationDet
   return details?.version === DETAILS_VERSION && "operations" in details && Array.isArray(details.operations);
 }
 
+function validatedSnapshot(details: TodoDetails | undefined): TodoState | undefined {
+  if (!isSnapshot(details)) return undefined;
+  try {
+    return cloneState(details.state);
+  } catch {
+    return undefined;
+  }
+}
+
 function restore(ctx: ExtensionContext): TodoState {
   const branch = ctx.sessionManager.getBranch();
   let restored = emptyState();
   let checkpointIndex = -1;
 
   for (let index = branch.length - 1; index >= 0; index -= 1) {
-    const details = entryDetails(branch[index]);
-    if (!isSnapshot(details)) continue;
-    try {
-      restored = cloneState(details.state);
-      checkpointIndex = index;
-      break;
-    } catch {
-      // Ignore malformed historical state and keep looking for a valid checkpoint.
-    }
+    const checkpoint = validatedSnapshot(entryDetails(branch[index]));
+    if (!checkpoint) continue;
+    restored = checkpoint;
+    checkpointIndex = index;
+    break;
   }
 
   for (let index = checkpointIndex + 1; index < branch.length; index += 1) {
@@ -114,7 +119,6 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     customType: TODO_CONTEXT_TYPE,
     content: `[TODO LIST - state after compaction]\n${formatTodoContext(state)}\nKeep this list current with todo_list.`,
     display: false,
-    details: { version: DETAILS_VERSION, state: cloneState(state) } satisfies SnapshotDetails,
   });
 
   const needsTodoContext = (ctx: ExtensionContext): boolean => {
@@ -123,13 +127,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       const entry = branch[index]!;
       if (entry.type === "custom_message" && entry.customType === TODO_CONTEXT_TYPE) {
         const details = entryDetails(entry);
-        if (!isSnapshot(details)) continue;
-        try {
-          cloneState(details.state);
-          return false;
-        } catch {
-          continue;
-        }
+        if (details === undefined || validatedSnapshot(details)) return false;
       }
       if (entry.type === "compaction") return true;
     }
@@ -199,7 +197,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       let message: string;
       let details: MutationDetails | undefined;
       if (params.action === "list") {
-        message = formatTodoPage(state, params.offset ?? 0, params.limit ?? LIST_LIMIT);
+        message = formatTodoPage(state, params.offset ?? 0, params.limit ?? LIST_PAGE_LIMIT);
       } else if (params.action === "batch") {
         if (!params.operations) throw new Error("operations is required for batch");
         const messages = applyTodoBatch(state, params.operations);

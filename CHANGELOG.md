@@ -5,7 +5,7 @@
 ### Added
 
 - Add paginated `list` output with `offset` and `limit` parameters.
-- Add bounded active/pending context after compaction and use those messages as restore checkpoints.
+- Add bounded active/pending context after compaction without duplicating persisted state.
 - Add validation for persisted state and compatibility tests for version 1 and 2 snapshots.
 
 ### Changed
@@ -17,6 +17,7 @@
 ### Fixed
 
 - Prevent deep todo trees from overflowing the JavaScript call stack.
+- Strip terminal control characters and reject overlong restored todo text.
 - Skip malformed restore checkpoints and corrupt mutation logs, repair stale next IDs, and reject duplicate, orphaned, cyclic, or invalid items.
 - Include the failing operation number and rollback confirmation in batch errors.
 - Show usage instead of the full list for invalid `/todos` arguments.
