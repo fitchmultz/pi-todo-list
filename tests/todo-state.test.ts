@@ -109,6 +109,10 @@ test("malformed snapshots and ancestry fail without partial mutations", () => {
     () => cloneState({ nextId: 2, items: [{ id: 1, text: "Bad status", status: "paused" as never }] }),
     /Invalid status/,
   );
+  assert.throws(
+    () => cloneState({ nextId: 3, items: [{ id: 1, text: "Done parent", status: "completed" }, { id: 2, text: "Open child", status: "pending", parentId: 1 }] }),
+    /open under completed parent/,
+  );
 
   const orphan = { nextId: 2, items: [{ id: 1, text: "Orphan", status: "completed" as const, parentId: 99 }] };
   assert.throws(() => startTodo(orphan, 1), /missing parent/);
@@ -312,7 +316,7 @@ test("compact mutation logs restore branches and skip malformed snapshots", asyn
   assert.match(legacy.content[0]!.text, /#1 Legacy/);
 });
 
-test("restore skips only corrupt mutation logs", async () => {
+test("restore stops safely at a corrupt mutation log", async () => {
   const harness = createExtensionHarness();
   harness.switchBranch([
     {
@@ -328,7 +332,7 @@ test("restore skips only corrupt mutation logs", async () => {
   const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
   assert.match(restored.content[0]!.text, /#1 Checkpoint/);
   assert.match(restored.content[0]!.text, /#2 Before corrupt log/);
-  assert.match(restored.content[0]!.text, /#3 After corrupt log/);
+  assert.doesNotMatch(restored.content[0]!.text, /After corrupt log/);
 });
 
 test("malformed compaction context is replaced", async () => {

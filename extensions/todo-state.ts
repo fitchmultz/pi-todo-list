@@ -64,7 +64,12 @@ export function cloneState(state: TodoState): TodoState {
 
   const byId = new Map(items.map((todo) => [todo.id, todo]));
   for (const todo of items) {
-    if (todo.parentId !== undefined && !byId.has(todo.parentId)) throw new Error(`Todo #${todo.id} has missing parent #${todo.parentId}`);
+    if (todo.parentId === undefined) continue;
+    const parent = byId.get(todo.parentId);
+    if (!parent) throw new Error(`Todo #${todo.id} has missing parent #${todo.parentId}`);
+    if (parent.status === "completed" && todo.status !== "completed") {
+      throw new Error(`Todo #${todo.id} is open under completed parent #${parent.id}`);
+    }
   }
 
   const resolved = new Set<number>();

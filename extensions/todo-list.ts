@@ -99,7 +99,8 @@ function restore(ctx: ExtensionContext): TodoState {
       if (details.operations.length === 1) applyTodoMutation(restored, details.operations[0]!);
       else applyTodoBatch(restored, details.operations);
     } catch {
-      // Skip only the corrupt tool call; keep valid mutations around it.
+      // Later ID-based mutations are unsafe once replay has a gap.
+      break;
     }
   }
   return restored;
