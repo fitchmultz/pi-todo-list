@@ -8,13 +8,17 @@ import {
   cloneState,
   completeTodo,
   emptyState,
+  formatTodoContext,
+  formatTodoPage,
   formatTodoSnapshot,
   formatTodos,
   moveTodo,
+  orderedTodos,
   pauseTodo,
   removeTodo,
   reopenTodo,
   startTodo,
+  todoCounts,
   type TodoState,
   updateTodo,
 } from "../extensions/todo-state.ts";
@@ -74,7 +78,7 @@ test("batch mutations are ordered and atomic", () => {
 
 test("legacy done snapshots migrate to statuses", () => {
   const migrated = cloneState({
-    nextId: 3,
+    nextId: 1,
     items: [
       { id: 1, text: "Done", done: true },
       { id: 2, text: "Open", done: false },
@@ -84,6 +88,94 @@ test("legacy done snapshots migrate to statuses", () => {
     migrated.items.map((item) => item.status),
     ["completed", "pending"],
   );
+  assert.equal(migrated.nextId, 3);
+});
+
+test("malformed snapshots and ancestry fail without partial mutations", () => {
+  assert.throws(() => cloneState(undefined as never), /Invalid todo state/);
+  assert.throws(
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Duplicate", status: "pending" }, { id: 1, text: "Again", status: "pending" }] }),
+    /duplicate todo id/,
+  );
+  assert.throws(
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Orphan", status: "pending", parentId: 99 }] }),
+    /missing parent/,
+  );
+  assert.throws(
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Cycle", status: "pending", parentId: 1 }] }),
+    /cycle/,
+  );
+  assert.throws(
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Bad status", status: "paused" as never }] }),
+    /Invalid status/,
+  );
+
+  const orphan = { nextId: 2, items: [{ id: 1, text: "Orphan", status: "completed" as const, parentId: 99 }] };
+  assert.throws(() => startTodo(orphan, 1), /missing parent/);
+  assert.equal(orphan.items[0]!.status, "completed");
+
+  const cycle = { nextId: 2, items: [{ id: 1, text: "Cycle", status: "completed" as const, parentId: 1 }] };
+  assert.throws(() => pauseTodo(cycle, 1), /cycle/);
+  assert.equal(cycle.items[0]!.status, "completed");
+});
+
+test("deep tree operations are iterative", () => {
+  const size = 6_000;
+  const state: TodoState = {
+    nextId: size + 1,
+    items: Array.from({ length: size }, (_, index) => ({
+      id: index + 1,
+      text: `Todo ${index + 1}`,
+      status: "pending" as const,
+      ...(index === 0 ? {} : { parentId: index }),
+    })),
+  };
+
+  const ordered = orderedTodos(state);
+  assert.equal(ordered.length, size);
+  assert.equal(ordered.at(-1)?.depth, size - 1);
+  const deepPage = formatTodoPage(state, 5_900);
+  assert.ok(deepPage.length < 30_000);
+  assert.match(deepPage, /… - #5901 Todo 5901/);
+  assert.equal(completeTodo(state, 1), size);
+  assert.deepEqual(todoCounts(state), { pending: 0, inProgress: 0, completed: size });
+  startTodo(state, size);
+  assert.deepEqual(todoCounts(state), { pending: size - 1, inProgress: 1, completed: 0 });
+});
+
+test("batch errors identify the operation and preserve state", () => {
+  const state = emptyState();
+  assert.throws(
+    () => applyTodoBatch(state, [{ action: "add", text: "First" }, { action: "missing" as never }]),
+    /Batch operation 2 \(missing\).*No changes applied/,
+  );
+  assert.deepEqual(state, emptyState());
+});
+
+test("list pages and compaction context stay bounded", () => {
+  const text = "x".repeat(240);
+  const state: TodoState = {
+    nextId: 131,
+    items: Array.from({ length: 130 }, (_, index) => ({
+      id: index + 1,
+      text,
+      status: index < 30 ? "in_progress" : "pending",
+    })),
+  };
+
+  const firstPage = formatTodoPage(state);
+  assert.match(firstPage, /Showing 1-100 of 130/);
+  assert.match(firstPage, /> #1 /);
+  assert.doesNotMatch(firstPage, /- #101 /);
+  const lastPage = formatTodoPage(state, 100, 30);
+  assert.match(lastPage, /Showing 101-130 of 130/);
+  assert.match(lastPage, /- #130 /);
+
+  const context = formatTodoContext(state);
+  assert.ok(context.length < 10_000);
+  assert.match(context, /5 active and 75 pending not shown/);
+  assert.doesNotMatch(context, /> #26 /);
+  assert.doesNotMatch(context, /- #56 /);
 });
 
 function createExtensionHarness() {
@@ -92,7 +184,7 @@ function createExtensionHarness() {
   type Command = { handler: (args: string, ctx: unknown) => Promise<void> };
   const handlers = new Map<string, Handler>();
   const sent: Array<{
-    message: { content: string };
+    message: { customType?: string; content: string; display?: boolean; details?: unknown };
     options?: { deliverAs?: string; triggerTurn?: boolean };
   }> = [];
   let branch: Array<Record<string, unknown>> = [];
@@ -117,7 +209,7 @@ function createExtensionHarness() {
     on: (event: string, handler: Handler) => { handlers.set(event, handler); },
     registerTool: (registered: Tool) => { tool = registered; },
     registerCommand: (_name: string, registered: Command) => { command = registered; },
-    sendMessage: (message: { content: string }, options?: { deliverAs?: string; triggerTurn?: boolean }) => {
+    sendMessage: (message: { customType?: string; content: string; display?: boolean; details?: unknown }, options?: { deliverAs?: string; triggerTurn?: boolean }) => {
       sent.push({ message, options });
     },
   } as never);
@@ -147,7 +239,10 @@ function createExtensionHarness() {
     compact(willRetry: boolean, id: string) {
       const compactionEntry = { type: "compaction", id };
       branch.push(compactionEntry);
-      return emit("session_compact", { willRetry, compactionEntry });
+      const sentBefore = sent.length;
+      const result = emit("session_compact", { willRetry, compactionEntry });
+      for (const queued of sent.slice(sentBefore)) branch.push({ type: "custom_message", ...queued.message });
+      return result;
     },
     async execute(params: Record<string, unknown>) {
       assert.ok(tool);
@@ -174,6 +269,8 @@ test("UI updates and commands honor availability", async () => {
   await interactive.runCommand("hide");
   assert.equal(interactive.widgetUpdates.at(-1), undefined);
   assert.equal(interactive.notifications.at(-1), "Todo widget hidden");
+  await interactive.runCommand("gibberish");
+  assert.equal(interactive.notifications.at(-1), "Usage: /todos [toggle|show|hide]");
 
   const headless = createExtensionHarness();
   headless.setHasUI(false);
@@ -182,6 +279,82 @@ test("UI updates and commands honor availability", async () => {
   assert.equal(headless.widgetUpdates.length, 0);
   assert.equal(headless.statusUpdates.length, 0);
   assert.equal(headless.notifications.length, 0);
+});
+
+test("compact mutation logs restore branches and skip malformed snapshots", async () => {
+  const harness = createExtensionHarness();
+  const added = (await harness.execute({ action: "add", text: "Persist me" })) as {
+    content: Array<{ text: string }>;
+    details?: { version: number; operations?: unknown[]; state?: unknown };
+  };
+  assert.equal(added.details?.version, 3);
+  assert.equal(added.details?.operations?.length, 1);
+  assert.equal(added.details?.state, undefined);
+
+  const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }>; details?: unknown };
+  assert.equal(listed.details, undefined);
+  assert.match(listed.content[0]!.text, /#1 Persist me/);
+  const savedBranch = harness.branch();
+
+  harness.switchBranch([]);
+  const empty = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.equal(empty.content[0]!.text, "No todos");
+  harness.switchBranch(savedBranch);
+  const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(restored.content[0]!.text, /#1 Persist me/);
+
+  const legacyState = { nextId: 2, items: [{ id: 1, text: "Legacy", status: "pending" }] };
+  harness.switchBranch([
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, action: "add", state: legacyState } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, action: "add", state: null } } },
+  ]);
+  const legacy = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(legacy.content[0]!.text, /#1 Legacy/);
+});
+
+test("restore skips only corrupt mutation logs", async () => {
+  const harness = createExtensionHarness();
+  harness.switchBranch([
+    {
+      type: "custom_message",
+      customType: "todo-list-context",
+      details: { version: 3, state: { nextId: 2, items: [{ id: 1, text: "Checkpoint", status: "pending" }] } },
+    },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Before corrupt log" }] } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "missing" }] } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After corrupt log" }] } } },
+  ]);
+
+  const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(restored.content[0]!.text, /#1 Checkpoint/);
+  assert.match(restored.content[0]!.text, /#2 Before corrupt log/);
+  assert.match(restored.content[0]!.text, /#3 After corrupt log/);
+});
+
+test("malformed compaction context is replaced", async () => {
+  const harness = createExtensionHarness();
+  harness.switchBranch([
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Persist me" }] } } },
+    { type: "compaction", id: "checkpoint" },
+    { type: "custom_message", customType: "todo-list-context", details: { version: 3, state: null } },
+  ]);
+
+  assert.ok((harness.emit("before_agent_start", {}) as { message?: unknown } | undefined)?.message);
+});
+
+test("compaction messages checkpoint later mutation logs", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Before checkpoint" });
+  harness.compact(false, "checkpoint");
+  assert.ok((harness.emit("before_agent_start", {}) as { message?: unknown } | undefined)?.message);
+  await harness.execute({ action: "add", text: "After checkpoint" });
+  const branch = harness.branch();
+
+  harness.switchBranch([]);
+  harness.switchBranch(branch);
+  const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(restored.content[0]!.text, /#1 Before checkpoint/);
+  assert.match(restored.content[0]!.text, /#2 After checkpoint/);
 });
 
 test("ordinary compaction injects live state only on its active branch", async () => {
@@ -209,6 +382,16 @@ test("ordinary compaction injects live state only on its active branch", async (
   assert.equal(await harness.emit("before_agent_start", {}), undefined);
 });
 
+test("compaction checkpoints an emptied list", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Temporary" });
+  await harness.execute({ action: "remove", id: 1 });
+  harness.compact(false, "compaction-empty-history");
+
+  const result = (await harness.emit("before_agent_start", {})) as { message?: { content?: string } } | undefined;
+  assert.equal(result?.message?.content, "[TODO LIST - state after compaction]\nNo todos\nKeep this list current with todo_list.");
+});
+
 test("overflow compaction immediately steers the current todo state", async () => {
   const empty = createExtensionHarness();
   empty.compact(true, "compaction-empty-overflow");
@@ -221,4 +404,6 @@ test("overflow compaction immediately steers the current todo state", async () =
   assert.equal(harness.sent.length, 1);
   assert.match(harness.sent[0]!.message.content, /TODO: 0 active, 1 pending, 0 completed/);
   assert.deepEqual(harness.sent[0]!.options, { deliverAs: "steer", triggerTurn: false });
+  // Overflow retries use agent.continue() in Pi 0.84.1; guard against duplicate context if that lifecycle changes.
+  assert.equal(harness.emit("before_agent_start", {}), undefined);
 });

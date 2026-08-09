@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.0] - 2026-08-09
+
+### Added
+
+- Add paginated `list` output with `offset` and `limit` parameters.
+- Add bounded active/pending context after compaction and use those messages as restore checkpoints.
+- Add validation for persisted state and compatibility tests for version 1 and 2 snapshots.
+
+### Changed
+
+- Replace full-state details on every tool result with compact mutation logs, reducing session growth from quadratic to linear.
+- Make tree traversal and subtree mutations iterative and linear-time.
+- Require Pi 0.84.1 or later.
+
+### Fixed
+
+- Prevent deep todo trees from overflowing the JavaScript call stack.
+- Skip malformed restore checkpoints and corrupt mutation logs, repair stale next IDs, and reject duplicate, orphaned, cyclic, or invalid items.
+- Include the failing operation number and rollback confirmation in batch errors.
+- Show usage instead of the full list for invalid `/todos` arguments.
+- Avoid rebuilding the full tree while the widget is hidden or only its first eight rows are needed.
+
 ## [0.2.0] - 2026-08-06
 
 ### Changed
