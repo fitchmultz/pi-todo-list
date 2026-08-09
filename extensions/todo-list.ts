@@ -24,15 +24,17 @@ const DETAILS_VERSION = 3;
 const WIDGET_LIMIT = 8;
 
 interface SnapshotDetails {
-  version: 1 | 2 | 3;
+  version: 1 | 2;
   state: TodoState;
 }
 interface MutationDetails {
   version: 3;
   operations: TodoMutation[];
 }
-type TodoDetails = SnapshotDetails | MutationDetails;
-
+interface ReadDetails {
+  version: 3;
+  read: "list";
+}
 const Mutation = Type.Object({
   action: StringEnum(TODO_MUTATIONS),
   id: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -50,33 +52,40 @@ const Params = Type.Object({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: LIST_PAGE_LIMIT, description: `List page size (default and maximum ${LIST_PAGE_LIMIT})` })),
 });
 
-function entryDetails(entry: unknown): TodoDetails | undefined {
-  if (!entry || typeof entry !== "object") return undefined;
+const NOT_TODO_RESULT = Symbol("not-todo-result");
+const NO_TODO_CHANGE = Symbol("no-todo-change");
+
+function entryDetails(entry: unknown): unknown | typeof NOT_TODO_RESULT | typeof NO_TODO_CHANGE {
+  if (!entry || typeof entry !== "object") return NOT_TODO_RESULT;
   const candidate = entry as {
     type?: string;
-    customType?: string;
-    details?: unknown;
-    message?: { role?: string; toolName?: string; details?: unknown };
+    message?: { role?: string; toolName?: string; details?: unknown; isError?: boolean };
   };
   if (candidate.type === "message" && candidate.message?.role === "toolResult" && candidate.message.toolName === "todo_list") {
-    return candidate.message.details as TodoDetails | undefined;
+    return candidate.message.isError ? NO_TODO_CHANGE : candidate.message.details;
   }
-  if (candidate.type === "custom_message" && candidate.customType === TODO_CONTEXT_TYPE) {
-    return candidate.details as TodoDetails | undefined;
-  }
-  return undefined;
+  return NOT_TODO_RESULT;
 }
 
-function isSnapshot(details: TodoDetails | undefined): details is SnapshotDetails {
-  return !!details && [1, 2, 3].includes(details.version) && "state" in details;
+function isSnapshot(details: unknown): details is SnapshotDetails {
+  if (!details || typeof details !== "object") return false;
+  const candidate = details as { version?: unknown };
+  return (candidate.version === 1 || candidate.version === 2) && "state" in details;
 }
 
-function isMutationLog(details: TodoDetails | undefined): details is MutationDetails {
-  return details?.version === DETAILS_VERSION && "operations" in details && Array.isArray(details.operations);
+function isMutationLog(details: unknown): details is MutationDetails {
+  if (!details || typeof details !== "object") return false;
+  const candidate = details as { version?: unknown; operations?: unknown };
+  return candidate.version === DETAILS_VERSION && Array.isArray(candidate.operations) && candidate.operations.length > 0 && candidate.operations.length <= 100;
 }
 
-function validatedSnapshot(details: TodoDetails | undefined): TodoState | undefined {
-  if (!isSnapshot(details)) return undefined;
+function isReadMarker(details: unknown): details is ReadDetails {
+  if (!details || typeof details !== "object") return false;
+  const candidate = details as { version?: unknown; read?: unknown };
+  return candidate.version === DETAILS_VERSION && candidate.read === "list";
+}
+
+function validatedSnapshot(details: SnapshotDetails): TodoState | undefined {
   try {
     return cloneState(details.state);
   } catch {
@@ -88,26 +97,45 @@ function restore(ctx: ExtensionContext): TodoState {
   const branch = ctx.sessionManager.getBranch();
   let restored = emptyState();
   let checkpointIndex = -1;
+  let restoreStopped = false;
 
   for (let index = branch.length - 1; index >= 0; index -= 1) {
-    const checkpoint = validatedSnapshot(entryDetails(branch[index]));
-    if (!checkpoint) continue;
+    const details = entryDetails(branch[index]);
+    if (!isSnapshot(details)) continue;
+    const checkpoint = validatedSnapshot(details);
+    if (!checkpoint) {
+      restoreStopped = true;
+      continue;
+    }
     restored = checkpoint;
     checkpointIndex = index;
     break;
   }
 
+  const base = cloneState(restored);
+  const appliedLogs: TodoMutation[][] = [];
   for (let index = checkpointIndex + 1; index < branch.length; index += 1) {
     const details = entryDetails(branch[index]);
-    if (!isMutationLog(details)) continue;
+    if (details === NOT_TODO_RESULT || details === NO_TODO_CHANGE) continue;
+    if (isReadMarker(details)) continue;
+    if (!isMutationLog(details)) {
+      restoreStopped = true;
+      break;
+    }
     try {
-      if (details.operations.length === 1) applyTodoMutation(restored, details.operations[0]!);
-      else applyTodoBatch(restored, details.operations);
+      for (const operation of details.operations) applyTodoMutation(restored, operation);
+      appliedLogs.push(details.operations);
     } catch {
-      // Later ID-based mutations are unsafe once replay has a gap.
+      restored = cloneState(base);
+      for (const operations of appliedLogs) {
+        for (const operation of operations) applyTodoMutation(restored, operation);
+      }
+      restoreStopped = true;
       break;
     }
   }
+
+  if (restoreStopped && ctx.hasUI) ctx.ui.notify("Todo restore stopped at corrupt session data; later changes were not replayed.", "warning");
   return restored;
 }
 
@@ -125,10 +153,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     const branch = ctx.sessionManager.getBranch();
     for (let index = branch.length - 1; index >= 0; index -= 1) {
       const entry = branch[index]!;
-      if (entry.type === "custom_message" && entry.customType === TODO_CONTEXT_TYPE) {
-        const details = entryDetails(entry);
-        if (details === undefined || validatedSnapshot(details)) return false;
-      }
+      if (entry.type === "custom_message" && entry.customType === TODO_CONTEXT_TYPE) return false;
       if (entry.type === "compaction") return true;
     }
     return false;
@@ -189,15 +214,17 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use todo_list at the start or resumption of multi-step work. Start items before working, complete them after verification, and pause interrupted work.",
       "Before claiming completion, use todo_list to reconcile outstanding items. Keep items concise and batch related mutations into one call.",
+      "Starting, pausing, or reopening a nested todo reopens completed ancestors.",
     ],
     parameters: Params,
     executionMode: "sequential",
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       let message: string;
-      let details: MutationDetails | undefined;
+      let details: MutationDetails | ReadDetails;
       if (params.action === "list") {
         message = formatTodoPage(state, params.offset ?? 0, params.limit ?? LIST_PAGE_LIMIT);
+        details = { version: DETAILS_VERSION, read: "list" };
       } else if (params.action === "batch") {
         if (!params.operations) throw new Error("operations is required for batch");
         const messages = applyTodoBatch(state, params.operations);

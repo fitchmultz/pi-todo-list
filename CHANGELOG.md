@@ -11,17 +11,17 @@
 ### Changed
 
 - Replace full-state details on every tool result with compact mutation logs, reducing session growth from quadratic to linear.
-- Make tree traversal and subtree mutations iterative and linear-time.
+- Make deep tree traversal and subtree mutations iterative.
 - Require Pi 0.84.1 or later.
 
 ### Fixed
 
 - Prevent deep todo trees from overflowing the JavaScript call stack.
 - Strip terminal control characters and reject overlong restored todo text.
-- Skip malformed restore checkpoints and corrupt mutation logs, repair stale next IDs, and reject duplicate, orphaned, cyclic, or invalid items.
+- Stop safely at corrupt restore entries, repair stale next IDs, and reject duplicate, orphaned, cyclic, or invalid items.
 - Include the failing operation number and rollback confirmation in batch errors.
 - Show usage instead of the full list for invalid `/todos` arguments.
-- Avoid rebuilding the full tree while the widget is hidden or only its first eight rows are needed.
+- Bound widget rendering to eight rows and skip tree formatting while hidden.
 
 ## [0.2.0] - 2026-08-06
 

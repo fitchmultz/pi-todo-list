@@ -32,7 +32,7 @@ export interface TodoMutation {
 }
 
 const TODO_STATUSES: readonly TodoStatus[] = ["pending", "in_progress", "completed"];
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g;
 const CONTEXT_ITEMS_PER_STATUS = 25;
 const CONTEXT_TEXT_LENGTH = 160;
 export const LIST_PAGE_LIMIT = 100;
@@ -58,8 +58,10 @@ export function cloneState(state: TodoState): TodoState {
 
     let status: TodoStatus;
     if (TODO_STATUSES.includes(raw.status)) status = raw.status;
-    else if (raw.status === undefined) status = raw.done ? "completed" : "pending";
-    else throw new Error(`Invalid status for todo #${raw.id}`);
+    else if (raw.status === undefined) {
+      if (raw.done !== undefined && typeof raw.done !== "boolean") throw new Error(`Invalid done flag for todo #${raw.id}`);
+      status = raw.done === true ? "completed" : "pending";
+    } else throw new Error(`Invalid status for todo #${raw.id}`);
 
     ids.add(raw.id);
     return { id: raw.id, text, status, ...(raw.parentId === undefined ? {} : { parentId: raw.parentId }) };
@@ -349,8 +351,8 @@ function formatRows(rows: Array<{ item: TodoItem; depth: number }>): string {
 
 export function formatTodoPage(state: TodoState, offset = 0, limit = LIST_PAGE_LIMIT): string {
   if (state.items.length === 0) return "No todos";
-  const start = Math.max(0, Math.floor(offset));
-  const pageSize = Math.min(LIST_PAGE_LIMIT, Math.max(1, Math.floor(limit)));
+  const start = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+  const pageSize = Number.isFinite(limit) ? Math.min(LIST_PAGE_LIMIT, Math.max(1, Math.floor(limit))) : LIST_PAGE_LIMIT;
   const rows = orderedTodos(state, true, pageSize, start);
   const counts = formatTodoCounts(state);
   if (rows.length === 0) return `${counts}\nNo todos at offset ${start}; ${state.items.length} total`;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import todoListExtension from "../extensions/todo-list.ts";
@@ -78,7 +79,7 @@ test("batch mutations are ordered and atomic", () => {
 
 test("todo text is bounded and safe to render", () => {
   const state = emptyState();
-  const todo = addTodo(state, "\u001b[31mred\u001b[0m\nline");
+  const todo = addTodo(state, "\u001b[31mred\u001b[0m\n\u202eline");
   assert.equal(todo.text, "[31mred [0m line");
   assert.throws(() => addTodo(state, "x".repeat(TODO_TEXT_LIMIT + 1)), /cannot exceed 240 characters/);
   assert.throws(
@@ -100,6 +101,10 @@ test("legacy done snapshots migrate to statuses", () => {
     ["completed", "pending"],
   );
   assert.equal(migrated.nextId, 3);
+  assert.throws(
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Invalid legacy flag", done: "false" }] } as unknown as TodoState),
+    /Invalid done flag/,
+  );
 });
 
 test("exhausted todo IDs fail without mutating state", () => {
@@ -206,6 +211,7 @@ test("list pages and compaction context stay bounded", () => {
   const lastPage = formatTodoPage(state, 100, 30);
   assert.match(lastPage, /Showing 101-130 of 130/);
   assert.match(lastPage, /- #130 /);
+  assert.match(formatTodoPage(state, Number.NaN, Number.NaN), /Showing 1-100 of 130/);
 
   const context = formatTodoContext(state);
   assert.ok(context.length < 10_000);
@@ -329,7 +335,7 @@ test("compact mutation logs restore branches and skip malformed snapshots", asyn
   assert.equal(added.details?.state, undefined);
 
   const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }>; details?: unknown };
-  assert.equal(listed.details, undefined);
+  assert.deepEqual(listed.details, { version: 3, read: "list" });
   assert.match(listed.content[0]!.text, /#1 Persist me/);
   const savedBranch = harness.branch();
 
@@ -355,34 +361,66 @@ test("compact mutation logs restore branches and skip malformed snapshots", asyn
   assert.match(legacy.content[0]!.text, /#1 Legacy/);
 });
 
-test("restore stops safely at a corrupt mutation log", async () => {
+test("restore stops at unknown persisted detail shapes", async () => {
   const harness = createExtensionHarness();
   harness.switchBranch([
-    {
-      type: "custom_message",
-      customType: "todo-list-context",
-      details: { version: 3, state: { nextId: 2, items: [{ id: 1, text: "Checkpoint", status: "pending" }] } },
-    },
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Before corrupt log" }] } } },
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "missing" }] } } },
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After corrupt log" }] } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Before gap" }] } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After harmless error" }] } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 4, operations: [{ action: "add", text: "Unknown version" }] } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After gap" }] } } },
+  ]);
+
+  const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(restored.content[0]!.text, /#1 Before gap/);
+  assert.match(restored.content[0]!.text, /#2 After harmless error/);
+  assert.doesNotMatch(restored.content[0]!.text, /After gap/);
+  assert.match(harness.notifications.at(-1) ?? "", /restore stopped at corrupt session data/);
+});
+
+test("restore rolls back a partially corrupt batch", async () => {
+  const harness = createExtensionHarness();
+  harness.switchBranch([
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 2, state: { nextId: 2, items: [{ id: 1, text: "Checkpoint", status: "pending" }] } } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Before corrupt batch" }] } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Partial" }, { action: "missing" }] } } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After corrupt batch" }] } } },
   ]);
 
   const restored = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
   assert.match(restored.content[0]!.text, /#1 Checkpoint/);
-  assert.match(restored.content[0]!.text, /#2 Before corrupt log/);
-  assert.doesNotMatch(restored.content[0]!.text, /After corrupt log/);
+  assert.match(restored.content[0]!.text, /#2 Before corrupt batch/);
+  assert.doesNotMatch(restored.content[0]!.text, /Partial|After corrupt batch/);
+  const added = (await harness.execute({ action: "add", text: "Recovered" })) as { content: Array<{ text: string }> };
+  assert.match(added.content[0]!.text, /Added #3: Recovered/);
 });
 
-test("malformed compaction context is replaced", async () => {
-  const harness = createExtensionHarness();
-  harness.switchBranch([
-    { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Persist me" }] } } },
-    { type: "compaction", id: "checkpoint" },
-    { type: "custom_message", customType: "todo-list-context", details: { version: 3, state: null } },
-  ]);
+test("batch-log restore scales near-linearly", async () => {
+  const makeBranch = (size: number) => Array.from({ length: size / 2 }, (_, index) => ({
+    type: "message",
+    message: {
+      role: "toolResult",
+      toolName: "todo_list",
+      details: { version: 3, operations: [{ action: "add", text: `Todo ${index * 2 + 1}` }, { action: "add", text: `Todo ${index * 2 + 2}` }] },
+    },
+  }));
+  const measure = (branch: Array<Record<string, unknown>>) => {
+    const harness = createExtensionHarness();
+    harness.setHasUI(false);
+    const started = performance.now();
+    harness.switchBranch(branch);
+    return { duration: performance.now() - started, harness };
+  };
+  const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
+  const smallBranch = makeBranch(1_000);
+  const largeBranch = makeBranch(4_000);
+  const small = median(Array.from({ length: 3 }, () => measure(smallBranch).duration));
+  const largeRuns = Array.from({ length: 3 }, () => measure(largeBranch));
+  const large = median(largeRuns.map((run) => run.duration));
 
-  assert.ok((harness.emit("before_agent_start", {}) as { message?: unknown } | undefined)?.message);
+  assert.ok(large < small * 10 + 10, `Expected near-linear restore scaling, got ${small.toFixed(2)}ms -> ${large.toFixed(2)}ms`);
+  const restored = (await largeRuns[0]!.harness.execute({ action: "list", offset: 3_900 })) as { content: Array<{ text: string }> };
+  assert.match(restored.content[0]!.text, /#4000 Todo 4000/);
 });
 
 test("compaction context stays bounded without duplicating state", async () => {
