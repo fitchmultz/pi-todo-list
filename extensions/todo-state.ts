@@ -345,7 +345,7 @@ export function formatTodoCounts(state: TodoState): string {
   return `TODO: ${counts.inProgress} active, ${counts.pending} pending, ${counts.completed} completed`;
 }
 
-function formatRows(rows: Array<{ item: TodoItem; depth: number }>): string {
+export function formatRows(rows: Array<{ item: TodoItem; depth: number }>): string {
   return rows
     .map(({ item: todo, depth }) => {
       const marker = todo.status === "in_progress" ? ">" : todo.status === "completed" ? "x" : "-";
@@ -394,7 +394,7 @@ export function formatTodoContext(state: TodoState): string {
   const hiddenPending = counts.pending - Math.min(counts.pending, CONTEXT_ITEMS_PER_STATUS);
   if (hiddenActive + hiddenPending > 0) {
     const hidden = [hiddenActive > 0 ? `${hiddenActive} active` : "", hiddenPending > 0 ? `${hiddenPending} pending` : ""].filter(Boolean).join(" and ");
-    lines.push(`… ${hidden} not shown; use todo_list list to page through all items`);
+    lines.push(`… ${hidden} not shown; use todo_list list to page through the open items`);
   }
   return `${formatTodoCounts(state)}\n${lines.join("\n")}`;
 }

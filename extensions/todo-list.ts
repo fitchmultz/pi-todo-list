@@ -8,6 +8,7 @@ import {
   emptyState,
   formatTodoContext,
   formatTodoCounts,
+  formatRows,
   formatTodoPage,
   orderedTodos,
   todoCounts,
@@ -174,7 +175,7 @@ function restore(ctx: ExtensionContext): { state: TodoState; recoveryNeeded: boo
 export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
   let recoveryNeeded = false;
-  let widgetVisible = process.env.PI_TODO_WIDGET === "show";
+  let widgetVisible = process.env.PI_TODO_WIDGET?.trim().toLowerCase() === "show";
 
   const todoContextMessage = () => ({
     customType: TODO_CONTEXT_TYPE,
@@ -294,7 +295,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("todos", {
-    description: "Show todos, or use /todos toggle|show|hide to control the widget",
+    description: "Show open todos, /todos all for completed history, or /todos toggle|show|hide to control the widget",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const command = args.trim();
@@ -304,8 +305,12 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`Todo widget ${widgetVisible ? "shown" : "hidden"}`, "info");
       } else if (!command) {
         ctx.ui.notify(formatTodoPage(state), "info");
+      } else if (command === "all") {
+        // The agent pays tokens for every list; a human reading /todos does not.
+        const rows = orderedTodos(state, true, LIST_PAGE_LIMIT);
+        ctx.ui.notify(rows.length === 0 ? "No todos" : `${formatTodoCounts(state)}\n${formatRows(rows)}`, "info");
       } else {
-        ctx.ui.notify("Usage: /todos [toggle|show|hide]", "warning");
+        ctx.ui.notify("Usage: /todos [all|toggle|show|hide]", "warning");
       }
     },
   });

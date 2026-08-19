@@ -240,7 +240,7 @@ test("list pages and compaction context stay bounded", () => {
 
   const context = formatTodoContext(state);
   assert.ok(context.length < 10_000);
-  assert.match(context, /5 active and 75 pending not shown/);
+  assert.match(context, /5 active and 75 pending not shown; use todo_list list to page through the open items/);
   assert.doesNotMatch(context, /> #26 /);
   assert.doesNotMatch(context, /- #56 /);
 });
@@ -364,7 +364,7 @@ test("UI updates and commands honor availability", async () => {
   assert.equal(interactive.widgetUpdates.at(-1), undefined);
   assert.equal(interactive.notifications.at(-1), "Todo widget hidden");
   await interactive.runCommand("gibberish");
-  assert.equal(interactive.notifications.at(-1), "Usage: /todos [toggle|show|hide]");
+  assert.equal(interactive.notifications.at(-1), "Usage: /todos [all|toggle|show|hide]");
 
   const nested = createExtensionHarness();
   await nested.runCommand("show");
@@ -423,8 +423,19 @@ test("a widget failure cannot discard a persisted mutation", async () => {
   assert.match(listed.content[0]!.text, /#1 Survives a render failure/);
 });
 
+test("/todos all shows the completed history the agent no longer pays for", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Finished thing" });
+  await harness.execute({ action: "complete", id: 1 });
+
+  await harness.runCommand("");
+  assert.doesNotMatch(harness.notifications.at(-1) ?? "", /Finished thing/);
+  await harness.runCommand("all");
+  assert.match(harness.notifications.at(-1) ?? "", /x #1 Finished thing/);
+});
+
 test("PI_TODO_WIDGET=show starts the widget visible", async () => {
-  process.env.PI_TODO_WIDGET = "show";
+  process.env.PI_TODO_WIDGET = " Show ";
   try {
     const harness = createExtensionHarness();
     await harness.execute({ action: "add", text: "Configured visible" });

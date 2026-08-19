@@ -5,7 +5,11 @@
 ### Changed
 
 - Return open items from `list` and count the completed ones in its header, so a long session stops paying for finished work on every page. This matches the widget and the post-compaction summary, which were already open-only.
-- Read `PI_TODO_WIDGET=show` at startup so a preference for the visible widget can outlive the process.
+- Read `PI_TODO_WIDGET=show` at startup to start the widget visible instead of hidden. An ad-hoc `/todos toggle` still lasts only for the process.
+
+### Added
+
+- Add `/todos all`, which lists completed items with their text for the human reading the terminal. The agent's `list` stays open-only.
 
 ## [0.4.0] - 2026-08-19
 
