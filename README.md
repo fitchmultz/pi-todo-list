@@ -35,7 +35,7 @@ Then ask the agent to track the work. It will list todos when starting or resumi
 
 `list` returns up to 100 open items and counts the completed ones in its header, matching the widget and the post-compaction summary. Use its zero-based `offset` and optional `limit` to continue through larger lists.
 
-`/todos` shows the first page of open items and `/todos all` adds the completed ones with their text, up to 100 rows, since a human reading the terminal pays no tokens for them. The agent cannot read a completed item's id, so pass it along from `/todos all` when you want one reopened. `/todos toggle`, `/todos show`, and `/todos hide` control the widget. The widget starts hidden, and the footer status reports active and pending counts. Set `PI_TODO_WIDGET=show` to start it visible instead.
+`/todos` shows the first page of open items and `/todos all` adds the completed ones with their text, up to 100 rows, since a human reading the terminal pays no tokens for them. `list` no longer returns completed items, so pass an id along from `/todos all` when you want one reopened and the agent no longer has it in context. `/todos toggle`, `/todos show`, and `/todos hide` control the widget. The widget starts hidden, and the footer status reports active and pending counts. Set `PI_TODO_WIDGET=show` to start it visible instead.
 
 ## Caching
 

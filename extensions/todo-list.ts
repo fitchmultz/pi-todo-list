@@ -212,8 +212,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     const visible = orderedTodos(state, false, WIDGET_LIMIT);
     const lines = visible.map(({ item, depth }) => {
       const active = item.status === "in_progress";
-      // A row appears only once all of its ancestors have, so depth stays under
-      // WIDGET_LIMIT and below the indent cap formatRows needs for deep pages.
+      // A row appears only once all of its ancestors have, so depth stays below
+      // WIDGET_LIMIT here and never reaches the cap that paged output needs.
       return `${"  ".repeat(depth)}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
     });
     if (openCount > visible.length) lines.push(ctx.ui.theme.fg("dim", `… ${openCount - visible.length} more`));
