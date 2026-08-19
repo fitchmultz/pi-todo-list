@@ -202,6 +202,21 @@ test("batch errors identify the operation and preserve state", () => {
   assert.deepEqual(state, emptyState());
 });
 
+test("list shows open work and counts the completed items", () => {
+  const state = emptyState();
+  addTodo(state, "Open parent");
+  addTodo(state, "Done parent");
+  addTodo(state, "Done child", 2);
+  completeTodo(state, 2);
+  assert.equal(
+    formatTodoPage(state),
+    "TODO: 0 active, 1 pending, 2 completed\n- #1 Open parent\n… 2 completed not shown",
+  );
+
+  completeTodo(state, 1);
+  assert.equal(formatTodoPage(state), "TODO: 0 active, 0 pending, 3 completed");
+});
+
 test("list pages and compaction context stay bounded", () => {
   const text = "x".repeat(240);
   const state: TodoState = {
@@ -214,18 +229,18 @@ test("list pages and compaction context stay bounded", () => {
   };
 
   const firstPage = formatTodoPage(state);
-  assert.match(firstPage, /Showing 1-100 of 130/);
+  assert.match(firstPage, /Showing 1-100 of 130 open/);
   assert.match(firstPage, /> #1 /);
   assert.doesNotMatch(firstPage, /- #101 /);
   const lastPage = formatTodoPage(state, 100, 30);
-  assert.match(lastPage, /Showing 101-130 of 130/);
+  assert.match(lastPage, /Showing 101-130 of 130 open/);
   assert.match(lastPage, /- #130 /);
-  assert.match(formatTodoPage(state, Number.NaN, Number.NaN), /Showing 1-100 of 130/);
-  assert.match(formatTodoPage(state, 200), /No todos at offset 200; 130 total/);
+  assert.match(formatTodoPage(state, Number.NaN, Number.NaN), /Showing 1-100 of 130 open/);
+  assert.match(formatTodoPage(state, 200), /No open todos at offset 200; 130 open/);
 
   const context = formatTodoContext(state);
   assert.ok(context.length < 10_000);
-  assert.match(context, /5 active and 75 pending not shown/);
+  assert.match(context, /5 active and 75 pending not shown; use todo_list list to page through the open items/);
   assert.doesNotMatch(context, /> #26 /);
   assert.doesNotMatch(context, /- #56 /);
 });
@@ -310,9 +325,18 @@ function createExtensionHarness() {
       for (const queued of sent.slice(sentBefore)) branch.push({ type: "custom_message", ...queued.message });
       return result;
     },
-    async execute(params: Record<string, unknown>) {
+    // tolerateRejection models Pi: a thrown execute() becomes an isError result
+    // carrying no details, which restore skips.
+    async execute(params: Record<string, unknown>, tolerateRejection = false) {
       assert.ok(tool);
-      const result = await tool.execute("test-call", params, undefined, undefined, ctx);
+      let result: unknown;
+      try {
+        result = await tool.execute("test-call", params, undefined, undefined, ctx);
+      } catch (error) {
+        if (!tolerateRejection) throw error;
+        branch.push({ type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } });
+        return undefined;
+      }
       branch.push({
         type: "message",
         message: {
@@ -328,6 +352,7 @@ function createExtensionHarness() {
 }
 
 test("UI updates and commands honor availability", async () => {
+  delete process.env.PI_TODO_WIDGET;
   const interactive = createExtensionHarness();
   await interactive.execute({ action: "add", text: "Visible todo" });
   assert.match(interactive.statusUpdates.at(-1) ?? "", /todo 0 active · 1 pending/);
@@ -339,7 +364,7 @@ test("UI updates and commands honor availability", async () => {
   assert.equal(interactive.widgetUpdates.at(-1), undefined);
   assert.equal(interactive.notifications.at(-1), "Todo widget hidden");
   await interactive.runCommand("gibberish");
-  assert.equal(interactive.notifications.at(-1), "Usage: /todos [toggle|show|hide]");
+  assert.equal(interactive.notifications.at(-1), "Usage: /todos [all|toggle|show|hide]");
 
   const nested = createExtensionHarness();
   await nested.runCommand("show");
@@ -389,13 +414,44 @@ test("todo_list opts into parallel tool batches and mutates atomically", async (
 test("a widget failure cannot discard a persisted mutation", async () => {
   const harness = createExtensionHarness();
   harness.failNextWidgetUpdate();
-  await harness.execute({ action: "add", text: "Survives a render failure" });
+  await harness.execute({ action: "add", text: "Survives a render failure" }, true);
 
   const branch = harness.branch();
   harness.switchBranch([]);
   harness.switchBranch(branch);
   const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
   assert.match(listed.content[0]!.text, /#1 Survives a render failure/);
+});
+
+test("/todos all shows the completed history the agent no longer pays for", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Finished thing" });
+  await harness.execute({ action: "complete", id: 1 });
+
+  await harness.runCommand("");
+  assert.doesNotMatch(harness.notifications.at(-1) ?? "", /Finished thing/);
+  await harness.runCommand("all");
+  assert.match(harness.notifications.at(-1) ?? "", /x #1 Finished thing/);
+
+  await harness.execute({
+    action: "batch",
+    operations: Array.from({ length: 100 }, (_, index) => ({ action: "add", text: `Filler ${index + 1}` })),
+  });
+  await harness.runCommand("all");
+  const truncated = harness.notifications.at(-1) ?? "";
+  assert.match(truncated, /Showing 100 of 101/);
+  assert.doesNotMatch(truncated, /#101 Filler 100/);
+});
+
+test("PI_TODO_WIDGET=show starts the widget visible", async () => {
+  process.env.PI_TODO_WIDGET = " Show ";
+  try {
+    const harness = createExtensionHarness();
+    await harness.execute({ action: "add", text: "Configured visible" });
+    assert.match(harness.widgetUpdates.at(-1)?.join("\n") ?? "", /#1 Configured visible/);
+  } finally {
+    delete process.env.PI_TODO_WIDGET;
+  }
 });
 
 test("compact mutation logs restore branches and skip malformed snapshots", async () => {

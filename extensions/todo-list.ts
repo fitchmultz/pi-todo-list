@@ -8,6 +8,7 @@ import {
   emptyState,
   formatTodoContext,
   formatTodoCounts,
+  formatRows,
   formatTodoPage,
   orderedTodos,
   todoCounts,
@@ -56,8 +57,8 @@ const Params = Type.Object({
   text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT, description: "Concise todo text for add or update" })),
   parentId: Type.Optional(Type.Integer({ minimum: 1, description: "Parent todo ID for add or move; omit on move to make it top-level" })),
   operations: Type.Optional(Type.Array(Mutation, { minItems: 1, maxItems: BATCH_OPERATION_LIMIT, description: "Required for batch. Ordered mutations applied atomically" })),
-  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based list offset" })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: LIST_PAGE_LIMIT, description: `List page size (default and maximum ${LIST_PAGE_LIMIT})` })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based offset into the open items" })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: LIST_PAGE_LIMIT, description: `Page size for open items (default and maximum ${LIST_PAGE_LIMIT})` })),
 });
 
 const NOT_TODO_RESULT = Symbol("not-todo-result");
@@ -174,7 +175,7 @@ function restore(ctx: ExtensionContext): { state: TodoState; recoveryNeeded: boo
 export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
   let recoveryNeeded = false;
-  let widgetVisible = false;
+  let widgetVisible = process.env.PI_TODO_WIDGET?.trim().toLowerCase() === "show";
 
   const todoContextMessage = () => ({
     customType: TODO_CONTEXT_TYPE,
@@ -211,6 +212,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     const visible = orderedTodos(state, false, WIDGET_LIMIT);
     const lines = visible.map(({ item, depth }) => {
       const active = item.status === "in_progress";
+      // A row appears only once all of its ancestors have, so depth stays below
+      // WIDGET_LIMIT here and never reaches the cap that paged output needs.
       return `${"  ".repeat(depth)}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
     });
     if (openCount > visible.length) lines.push(ctx.ui.theme.fg("dim", `… ${openCount - visible.length} more`));
@@ -244,7 +247,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "todo_list",
     label: "Todo List",
-    description: "Manage a persistent nested todo list with pending, in-progress, and completed items, including atomic batches",
+    description: "Manage a persistent nested todo list with pending, in-progress, and completed items, including atomic batches. list returns the open items and counts the completed ones",
     promptSnippet: "Track persistent pending, in-progress, and completed work across context compaction",
     promptGuidelines: [
       "Use todo_list at the start or resumption of multi-step work. Start items before working, complete them after verification, and pause interrupted work.",
@@ -294,7 +297,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("todos", {
-    description: "Show todos, or use /todos toggle|show|hide to control the widget",
+    description: "Show open todos, /todos all for completed history, or /todos toggle|show|hide to control the widget",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const command = args.trim();
@@ -304,8 +307,13 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`Todo widget ${widgetVisible ? "shown" : "hidden"}`, "info");
       } else if (!command) {
         ctx.ui.notify(formatTodoPage(state), "info");
+      } else if (command === "all") {
+        // The agent pays tokens for every list; a human reading /todos does not.
+        const rows = orderedTodos(state, true, LIST_PAGE_LIMIT);
+        const more = rows.length < state.items.length ? `\nShowing ${rows.length} of ${state.items.length}` : "";
+        ctx.ui.notify(rows.length === 0 ? "No todos" : `${formatTodoCounts(state)}\n${formatRows(rows)}${more}`, "info");
       } else {
-        ctx.ui.notify("Usage: /todos [toggle|show|hide]", "warning");
+        ctx.ui.notify("Usage: /todos [all|toggle|show|hide]", "warning");
       }
     },
   });
