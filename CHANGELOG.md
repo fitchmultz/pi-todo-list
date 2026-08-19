@@ -6,7 +6,11 @@
 
 - Hide the todo widget by default. The footer status still reports active and pending counts, and `/todos show` reveals the widget.
 - Stop declaring `todo_list` as a sequential tool. A single sequential tool serializes every sibling call in an assistant message, and todo mutations never yield mid-call.
-- Trim `todo_list` prompt guidance to two bullets and drop the pre-completion reconcile call, since every mutation result already reports the remaining counts.
+- Stop asking agents to spend a `todo_list` call reconciling before they finish. The guidance still requires leaving no item open, which the counts in every result already answer.
+
+### Fixed
+
+- Keep a mutation that already changed state when widget rendering fails, so the change is not dropped on the next resume.
 
 ## [0.3.0] - 2026-08-09
 

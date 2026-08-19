@@ -248,7 +248,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     promptSnippet: "Track persistent pending, in-progress, and completed work across context compaction",
     promptGuidelines: [
       "Use todo_list at the start or resumption of multi-step work. Start items before working, complete them after verification, and pause interrupted work.",
-      "Keep todo_list items concise and batch related mutations into one call; each result already reports the remaining counts.",
+      "Keep todo_list items concise and batch related mutations into one call. Leave no item open when you report multi-step work finished; the counts in each result cover that without an extra call.",
+      "Starting, pausing, or reopening a nested todo reopens completed ancestors.",
     ],
     parameters: Params,
     // No executionMode: execute() never awaits, and one sequential tool serializes the whole tool batch.
@@ -274,7 +275,13 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         details = { version: DETAILS_VERSION, operations: [operation] };
       }
 
-      updateWidget(ctx);
+      // State is already mutated here. An error result is skipped on restore, so
+      // letting a render failure escape would drop this change on the next resume.
+      try {
+        updateWidget(ctx);
+      } catch {
+        // Rendering is best effort.
+      }
       const recovering = recoveryNeeded;
       if (recovering) {
         details = { version: RECOVERY_VERSION, state: cloneState(state) };

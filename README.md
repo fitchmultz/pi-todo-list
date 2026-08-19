@@ -31,11 +31,9 @@ For a one-off run:
 pi -e ./extensions/todo-list.ts
 ```
 
-Then ask the agent to track the work. It will list todos when starting or resuming, mark items in progress, and reconcile outstanding items before finishing. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
+Then ask the agent to track the work. It will list todos when starting or resuming, mark items in progress, and leave nothing open when it reports the work finished. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
 
-`list` returns up to 100 items. Use its zero-based `offset` and optional `limit` to continue through larger lists. `/todos` shows the first page; `/todos toggle`, `/todos show`, and `/todos hide` control the widget.
-
-The widget starts hidden and the footer status reports active and pending counts. Use `/todos show` for the tree above the editor.
+`list` returns up to 100 items. Use its zero-based `offset` and optional `limit` to continue through larger lists. `/todos` shows the first page; `/todos toggle`, `/todos show`, and `/todos hide` control the widget. The widget starts hidden, and the footer status reports active and pending counts.
 
 ## Caching
 
@@ -45,7 +43,7 @@ The tool definition and system-prompt guidance are static. Mutations return only
 
 Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume replays those mutations on the active branch, using legacy version 1 and 2 snapshots when present. If restore encounters corrupt history, it warns, preserves the contiguous valid state, and writes one recovery checkpoint on the next successful `todo_list` call. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
 
-Do not reopen a version 0.3 session with an older extension release; older versions do not understand mutation logs.
+Do not reopen a version 0.3 or later session with an older extension release; older versions do not understand mutation logs.
 
 ## Development
 

@@ -242,13 +242,21 @@ function createExtensionHarness() {
   let branch: Array<Record<string, unknown>> = [];
   let hasUI = true;
   const widgetUpdates: Array<string[] | undefined> = [];
+  let widgetFailure: Error | undefined;
   const statusUpdates: Array<string | undefined> = [];
   const notifications: string[] = [];
   const ctx = {
     get hasUI() { return hasUI; },
     ui: {
       theme: { fg: (_color: string, text: string) => text },
-      setWidget(_key: string, content: string[] | undefined) { widgetUpdates.push(content); },
+      setWidget(_key: string, content: string[] | undefined) {
+        if (widgetFailure) {
+          const failure = widgetFailure;
+          widgetFailure = undefined;
+          throw failure;
+        }
+        widgetUpdates.push(content);
+      },
       setStatus(_key: string, text: string | undefined) { statusUpdates.push(text); },
       notify(message: string) { notifications.push(message); },
     },
@@ -285,6 +293,7 @@ function createExtensionHarness() {
       return tool;
     },
     setHasUI(value: boolean) { hasUI = value; },
+    failNextWidgetUpdate() { widgetFailure = new Error("widget render failed"); },
     async runCommand(args: string) {
       assert.ok(command);
       await command.handler(args, ctx);
@@ -352,7 +361,7 @@ test("UI updates and commands honor availability", async () => {
   assert.equal(headless.notifications.length, 0);
 });
 
-test("parallel tool batches keep todo mutations atomic and replayable", async () => {
+test("todo_list opts into parallel tool batches and mutates atomically", async () => {
   const harness = createExtensionHarness();
   // Pi serializes an entire tool batch when any tool in it declares executionMode "sequential".
   assert.equal(harness.toolDefinition().executionMode, undefined);
@@ -375,6 +384,21 @@ test("parallel tool batches keep todo mutations atomic and replayable", async ()
     listed.content[0]!.text,
     "TODO: 1 active, 2 pending, 0 completed\n> #1 Parent\n  - #2 First child\n  - #3 Second child",
   );
+});
+
+test("a widget failure cannot discard a persisted mutation", async () => {
+  const harness = createExtensionHarness();
+  harness.failNextWidgetUpdate();
+  const added = (await harness.execute({ action: "add", text: "Survives a render failure" })) as {
+    details?: { operations?: unknown[] };
+  };
+  assert.equal(added.details?.operations?.length, 1);
+
+  const branch = harness.branch();
+  harness.switchBranch([]);
+  harness.switchBranch(branch);
+  const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.match(listed.content[0]!.text, /#1 Survives a render failure/);
 });
 
 test("compact mutation logs restore branches and skip malformed snapshots", async () => {
