@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0] - 2026-08-19
+
+### Changed
+
+- Hide the todo widget by default. The footer status still reports active and pending counts, and `/todos show` reveals the widget.
+- Stop declaring `todo_list` as a sequential tool. A single sequential tool serializes every sibling call in an assistant message, and todo mutations never yield mid-call.
+- Trim `todo_list` prompt guidance to two bullets and drop the pre-completion reconcile call, since every mutation result already reports the remaining counts.
+
 ## [0.3.0] - 2026-08-09
 
 ### Added

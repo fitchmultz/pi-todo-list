@@ -5,7 +5,7 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 - Agent-callable `todo_list` tool with pending, in-progress, and completed states
 - Start, pause, complete, reopen, update, move, remove, and atomic batch actions
 - Nested items with recursive completion and deletion
-- Paginated list output plus a compact TUI widget and `/todos` controls
+- Paginated list output plus an opt-in TUI widget and `/todos` controls
 - Session-local, branch-aware persistence through tool result details
 - Survives compaction, resume, fork, and tree navigation
 
@@ -16,7 +16,7 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 ## Install
 
 ```bash
-pi install git:github.com/fitchmultz/pi-todo-list@v0.3.0
+pi install git:github.com/fitchmultz/pi-todo-list@v0.4.0
 ```
 
 For local development:
@@ -34,6 +34,8 @@ pi -e ./extensions/todo-list.ts
 Then ask the agent to track the work. It will list todos when starting or resuming, mark items in progress, and reconcile outstanding items before finishing. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
 
 `list` returns up to 100 items. Use its zero-based `offset` and optional `limit` to continue through larger lists. `/todos` shows the first page; `/todos toggle`, `/todos show`, and `/todos hide` control the widget.
+
+The widget starts hidden and the footer status reports active and pending counts. Use `/todos show` for the tree above the editor.
 
 ## Caching
 

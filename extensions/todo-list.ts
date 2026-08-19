@@ -174,7 +174,7 @@ function restore(ctx: ExtensionContext): { state: TodoState; recoveryNeeded: boo
 export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
   let recoveryNeeded = false;
-  let widgetVisible = true;
+  let widgetVisible = false;
 
   const todoContextMessage = () => ({
     customType: TODO_CONTEXT_TYPE,
@@ -248,12 +248,10 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     promptSnippet: "Track persistent pending, in-progress, and completed work across context compaction",
     promptGuidelines: [
       "Use todo_list at the start or resumption of multi-step work. Start items before working, complete them after verification, and pause interrupted work.",
-      "Before claiming completion, use todo_list to reconcile outstanding items. Keep items concise and batch related mutations into one call.",
-      "Starting, pausing, or reopening a nested todo reopens completed ancestors.",
+      "Keep todo_list items concise and batch related mutations into one call; each result already reports the remaining counts.",
     ],
     parameters: Params,
-    executionMode: "sequential",
-
+    // No executionMode: execute() never awaits, and one sequential tool serializes the whole tool batch.
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       let message: string;
       let details: MutationDetails | ReadDetails | RecoveryDetails;

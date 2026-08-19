@@ -232,7 +232,7 @@ test("list pages and compaction context stay bounded", () => {
 
 function createExtensionHarness() {
   type Handler = (...args: any[]) => any;
-  type Tool = { execute: (...args: any[]) => Promise<unknown> };
+  type Tool = { execute: (...args: any[]) => Promise<unknown>; executionMode?: string };
   type Command = { handler: (args: string, ctx: any) => Promise<void> };
   const handlers = new Map<string, Handler>();
   const sent: Array<{
@@ -280,6 +280,10 @@ function createExtensionHarness() {
     statusUpdates,
     notifications,
     branch: () => structuredClone(branch),
+    toolDefinition() {
+      assert.ok(tool);
+      return tool;
+    },
     setHasUI(value: boolean) { hasUI = value; },
     async runCommand(args: string) {
       assert.ok(command);
@@ -318,14 +322,18 @@ test("UI updates and commands honor availability", async () => {
   const interactive = createExtensionHarness();
   await interactive.execute({ action: "add", text: "Visible todo" });
   assert.match(interactive.statusUpdates.at(-1) ?? "", /todo 0 active · 1 pending/);
+  assert.equal(interactive.widgetUpdates.length, 1);
+  assert.equal(interactive.widgetUpdates.at(-1), undefined, "the widget stays hidden until /todos show");
+  await interactive.runCommand("show");
   assert.match(interactive.widgetUpdates.at(-1)?.join("\n") ?? "", /#1 Visible todo/);
-  await interactive.runCommand("hide");
+  await interactive.runCommand("toggle");
   assert.equal(interactive.widgetUpdates.at(-1), undefined);
   assert.equal(interactive.notifications.at(-1), "Todo widget hidden");
   await interactive.runCommand("gibberish");
   assert.equal(interactive.notifications.at(-1), "Usage: /todos [toggle|show|hide]");
 
   const nested = createExtensionHarness();
+  await nested.runCommand("show");
   await nested.execute({
     action: "batch",
     operations: Array.from({ length: 10 }, (_, index) => ({ action: "add", text: `Nested ${index + 1}`, ...(index === 0 ? {} : { parentId: index }) })),
@@ -342,6 +350,31 @@ test("UI updates and commands honor availability", async () => {
   assert.equal(headless.widgetUpdates.length, 0);
   assert.equal(headless.statusUpdates.length, 0);
   assert.equal(headless.notifications.length, 0);
+});
+
+test("parallel tool batches keep todo mutations atomic and replayable", async () => {
+  const harness = createExtensionHarness();
+  // Pi serializes an entire tool batch when any tool in it declares executionMode "sequential".
+  assert.equal(harness.toolDefinition().executionMode, undefined);
+
+  await harness.execute({ action: "add", text: "Parent" });
+  const concurrent = (await Promise.all([
+    harness.execute({ action: "add", text: "First child", parentId: 1 }),
+    harness.execute({ action: "add", text: "Second child", parentId: 1 }),
+    harness.execute({ action: "start", id: 1 }),
+  ])) as Array<{ content: Array<{ text: string }> }>;
+  assert.match(concurrent[0]!.content[0]!.text, /Added #2: First child/);
+  assert.match(concurrent[1]!.content[0]!.text, /Added #3: Second child/);
+  assert.match(concurrent[2]!.content[0]!.text, /Started #1: Parent/);
+
+  const branch = harness.branch();
+  harness.switchBranch([]);
+  harness.switchBranch(branch);
+  const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
+  assert.equal(
+    listed.content[0]!.text,
+    "TODO: 1 active, 2 pending, 0 completed\n> #1 Parent\n  - #2 First child\n  - #3 Second child",
+  );
 });
 
 test("compact mutation logs restore branches and skip malformed snapshots", async () => {
