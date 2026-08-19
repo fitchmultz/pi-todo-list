@@ -357,15 +357,20 @@ function formatRows(rows: Array<{ item: TodoItem; depth: number }>): string {
 
 export function formatTodoPage(state: TodoState, offset = 0, limit = LIST_PAGE_LIMIT): string {
   if (state.items.length === 0) return "No todos";
+  const header = formatTodoCounts(state);
+  const counts = todoCounts(state);
+  const open = counts.inProgress + counts.pending;
+  if (open === 0) return header;
+
   const start = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
   const pageSize = Number.isFinite(limit) ? Math.min(LIST_PAGE_LIMIT, Math.max(1, Math.floor(limit))) : LIST_PAGE_LIMIT;
-  const rows = orderedTodos(state, true, pageSize, start);
-  const counts = formatTodoCounts(state);
-  if (rows.length === 0) return `${counts}\nNo todos at offset ${start}; ${state.items.length} total`;
+  const rows = orderedTodos(state, false, pageSize, start);
+  if (rows.length === 0) return `${header}\nNo open todos at offset ${start}; ${open} open`;
 
-  const page = `${counts}\n${formatRows(rows)}`;
-  if (start === 0 && rows.length === state.items.length) return page;
-  return `${page}\nShowing ${start + 1}-${start + rows.length} of ${state.items.length}`;
+  const completed = counts.completed > 0 ? `\n… ${counts.completed} completed not shown` : "";
+  const page = `${header}\n${formatRows(rows)}${completed}`;
+  if (start === 0 && rows.length === open) return page;
+  return `${page}\nShowing ${start + 1}-${start + rows.length} of ${open} open`;
 }
 
 function shorten(text: string): string {

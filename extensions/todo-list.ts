@@ -56,8 +56,8 @@ const Params = Type.Object({
   text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT, description: "Concise todo text for add or update" })),
   parentId: Type.Optional(Type.Integer({ minimum: 1, description: "Parent todo ID for add or move; omit on move to make it top-level" })),
   operations: Type.Optional(Type.Array(Mutation, { minItems: 1, maxItems: BATCH_OPERATION_LIMIT, description: "Required for batch. Ordered mutations applied atomically" })),
-  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based list offset" })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: LIST_PAGE_LIMIT, description: `List page size (default and maximum ${LIST_PAGE_LIMIT})` })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based offset into the open items" })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: LIST_PAGE_LIMIT, description: `Page size for open items (default and maximum ${LIST_PAGE_LIMIT})` })),
 });
 
 const NOT_TODO_RESULT = Symbol("not-todo-result");
@@ -174,7 +174,7 @@ function restore(ctx: ExtensionContext): { state: TodoState; recoveryNeeded: boo
 export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
   let recoveryNeeded = false;
-  let widgetVisible = false;
+  let widgetVisible = process.env.PI_TODO_WIDGET === "show";
 
   const todoContextMessage = () => ({
     customType: TODO_CONTEXT_TYPE,
@@ -244,7 +244,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "todo_list",
     label: "Todo List",
-    description: "Manage a persistent nested todo list with pending, in-progress, and completed items, including atomic batches",
+    description: "Manage a persistent nested todo list with pending, in-progress, and completed items, including atomic batches. list returns the open items and counts the completed ones",
     promptSnippet: "Track persistent pending, in-progress, and completed work across context compaction",
     promptGuidelines: [
       "Use todo_list at the start or resumption of multi-step work. Start items before working, complete them after verification, and pause interrupted work.",
