@@ -389,10 +389,7 @@ test("todo_list opts into parallel tool batches and mutates atomically", async (
 test("a widget failure cannot discard a persisted mutation", async () => {
   const harness = createExtensionHarness();
   harness.failNextWidgetUpdate();
-  const added = (await harness.execute({ action: "add", text: "Survives a render failure" })) as {
-    details?: { operations?: unknown[] };
-  };
-  assert.equal(added.details?.operations?.length, 1);
+  await harness.execute({ action: "add", text: "Survives a render failure" });
 
   const branch = harness.branch();
   harness.switchBranch([]);

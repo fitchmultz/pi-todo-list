@@ -279,9 +279,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       // letting a render failure escape would drop this change on the next resume.
       try {
         updateWidget(ctx);
-      } catch {
-        // Rendering is best effort.
-      }
+      } catch {}
       const recovering = recoveryNeeded;
       if (recovering) {
         details = { version: RECOVERY_VERSION, state: cloneState(state) };
