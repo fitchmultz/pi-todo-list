@@ -212,6 +212,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     const visible = orderedTodos(state, false, WIDGET_LIMIT);
     const lines = visible.map(({ item, depth }) => {
       const active = item.status === "in_progress";
+      // A row appears only once all of its ancestors have, so depth stays under
+      // WIDGET_LIMIT and below the indent cap formatRows needs for deep pages.
       return `${"  ".repeat(depth)}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
     });
     if (openCount > visible.length) lines.push(ctx.ui.theme.fg("dim", `… ${openCount - visible.length} more`));
@@ -308,7 +310,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       } else if (command === "all") {
         // The agent pays tokens for every list; a human reading /todos does not.
         const rows = orderedTodos(state, true, LIST_PAGE_LIMIT);
-        ctx.ui.notify(rows.length === 0 ? "No todos" : `${formatTodoCounts(state)}\n${formatRows(rows)}`, "info");
+        const more = rows.length < state.items.length ? `\nShowing ${rows.length} of ${state.items.length}` : "";
+        ctx.ui.notify(rows.length === 0 ? "No todos" : `${formatTodoCounts(state)}\n${formatRows(rows)}${more}`, "info");
       } else {
         ctx.ui.notify("Usage: /todos [all|toggle|show|hide]", "warning");
       }

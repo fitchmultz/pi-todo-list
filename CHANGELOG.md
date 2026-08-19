@@ -9,7 +9,7 @@
 
 ### Added
 
-- Add `/todos all`, which lists completed items with their text for the human reading the terminal. The agent's `list` stays open-only.
+- Add `/todos all`, which lists completed items with their text for the human reading the terminal, up to 100 rows and reporting the total when it truncates. The agent's `list` stays open-only.
 
 ## [0.4.0] - 2026-08-19
 

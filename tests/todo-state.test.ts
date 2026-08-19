@@ -432,6 +432,15 @@ test("/todos all shows the completed history the agent no longer pays for", asyn
   assert.doesNotMatch(harness.notifications.at(-1) ?? "", /Finished thing/);
   await harness.runCommand("all");
   assert.match(harness.notifications.at(-1) ?? "", /x #1 Finished thing/);
+
+  await harness.execute({
+    action: "batch",
+    operations: Array.from({ length: 100 }, (_, index) => ({ action: "add", text: `Filler ${index + 1}` })),
+  });
+  await harness.runCommand("all");
+  const truncated = harness.notifications.at(-1) ?? "";
+  assert.match(truncated, /Showing 100 of 101/);
+  assert.doesNotMatch(truncated, /#101 Filler 100/);
 });
 
 test("PI_TODO_WIDGET=show starts the widget visible", async () => {
