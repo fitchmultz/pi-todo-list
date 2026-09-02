@@ -313,9 +313,16 @@ function createExtensionHarness() {
       assert.ok(command);
       await command.handler(args, ctx);
     },
+    startSession(entries: Array<Record<string, unknown>>) {
+      branch = structuredClone(entries);
+      return emit("session_start", {});
+    },
     switchBranch(entries: Array<Record<string, unknown>>) {
       branch = structuredClone(entries);
       return emit("session_tree", {});
+    },
+    startContextWindow(id: string) {
+      branch.push({ type: "context_window", id });
     },
     compact(willRetry: boolean, id: string) {
       const compactionEntry = { type: "compaction", id };
@@ -350,6 +357,124 @@ function createExtensionHarness() {
     emit,
   };
 }
+
+const contextWindowMarker = (windowId: string) => ({
+  role: "custom",
+  customType: "context-window",
+  content: `Context window ${windowId} starts here.`,
+  display: true,
+  details: { windowId },
+  timestamp: 1,
+});
+
+const userMessage = (text: string) => ({ role: "user", content: [{ type: "text", text }], timestamp: 2 });
+
+test("native context injection has no initial-window or never-used-list tax", async () => {
+  const harness = createExtensionHarness();
+  assert.equal(harness.emit("context", { messages: [userMessage("Initial request")] }), undefined);
+
+  await harness.execute({ action: "add", text: "Ordinary request" });
+  assert.equal(harness.emit("context", { messages: [userMessage("Still initial")] }), undefined);
+  await harness.execute({ action: "remove", id: 1 });
+
+  const unused = createExtensionHarness();
+  unused.startContextWindow("empty-window");
+  assert.equal(unused.emit("context", { messages: [contextWindowMarker("empty-window")] }), undefined);
+
+  harness.startContextWindow("empty-history-window");
+  const result = harness.emit("context", { messages: [contextWindowMarker("empty-history-window")] }) as {
+    messages: Array<{ customType?: string; content?: string; display?: boolean }>;
+  };
+  assert.deepEqual(result.messages.slice(1), [{
+    role: "custom",
+    customType: "todo-list-context",
+    content: "[TODO LIST - state after compaction]\nNo todos\nKeep this list current with todo_list.",
+    display: false,
+    timestamp: 1,
+  }]);
+});
+
+test("native context injects the boundary-time todo snapshot immediately after its marker", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Before boundary" });
+  harness.startContextWindow("window-a");
+  await harness.execute({ action: "add", text: "After boundary" });
+
+  const marker = contextWindowMarker("window-a");
+  const later = userMessage("Continue");
+  const result = harness.emit("context", { messages: [marker, later] }) as { messages: Array<Record<string, unknown>> };
+  assert.deepEqual(result.messages, [
+    marker,
+    {
+      role: "custom",
+      customType: "todo-list-context",
+      content: "[TODO LIST - state after compaction]\nTODO: 0 active, 1 pending, 0 completed\n- #1 Before boundary\nKeep this list current with todo_list.",
+      display: false,
+      timestamp: 1,
+    },
+    later,
+  ]);
+});
+
+test("native context keeps one byte-stable boundary snapshot after later mutations", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Before boundary" });
+  harness.startContextWindow("stable-window");
+  const marker = contextWindowMarker("stable-window");
+  const first = harness.emit("context", { messages: [marker] }) as { messages: Array<Record<string, unknown>> };
+  const firstBytes = JSON.stringify(first.messages[1]);
+  first.messages[1]!.content = "downstream mutation";
+
+  await harness.execute({ action: "add", text: "After boundary" });
+  const repeated = harness.emit("context", { messages: [marker, userMessage("Later request")] }) as {
+    messages: Array<Record<string, unknown>>;
+  };
+  assert.equal(JSON.stringify(repeated.messages[1]), firstBytes);
+  assert.doesNotMatch(String(repeated.messages[1]?.content), /After boundary/);
+});
+
+test("native context snapshots recompute on resume and tree navigation", async () => {
+  const previousSource = createExtensionHarness();
+  await previousSource.execute({ action: "add", text: "Previous boundary" });
+  previousSource.startContextWindow("shared-window");
+  const harness = createExtensionHarness();
+  harness.switchBranch(previousSource.branch());
+  harness.emit("context", { messages: [contextWindowMarker("shared-window")] });
+
+  const resumeSource = createExtensionHarness();
+  await resumeSource.execute({ action: "add", text: "Resume boundary" });
+  resumeSource.startContextWindow("shared-window");
+  harness.startSession(resumeSource.branch());
+  const resumed = harness.emit("context", { messages: [contextWindowMarker("shared-window")] }) as {
+    messages: Array<{ content?: string }>;
+  };
+  assert.match(resumed.messages[1]?.content ?? "", /#1 Resume boundary/);
+  assert.doesNotMatch(resumed.messages[1]?.content ?? "", /Previous boundary/);
+
+  const treeSource = createExtensionHarness();
+  await treeSource.execute({ action: "add", text: "Tree boundary" });
+  treeSource.startContextWindow("shared-window");
+  harness.switchBranch(treeSource.branch());
+  const navigated = harness.emit("context", { messages: [contextWindowMarker("shared-window")] }) as {
+    messages: Array<{ content?: string }>;
+  };
+  assert.match(navigated.messages[1]?.content ?? "", /#1 Tree boundary/);
+  assert.doesNotMatch(navigated.messages[1]?.content ?? "", /Resume boundary/);
+});
+
+test("native context does not duplicate an existing todo context", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Existing context" });
+  harness.startContextWindow("deduplicated-window");
+  const existing = {
+    role: "custom",
+    customType: "todo-list-context",
+    content: "already present",
+    display: false,
+    timestamp: 2,
+  };
+  assert.equal(harness.emit("context", { messages: [contextWindowMarker("deduplicated-window"), existing] }), undefined);
+});
 
 test("UI updates and commands honor availability", async () => {
   delete process.env.PI_TODO_WIDGET;
@@ -614,6 +739,21 @@ test("compaction context stays bounded without duplicating state", async () => {
   assert.match(restored.content[0]!.text, /#2 After checkpoint/);
 });
 
+test("a native window ignores older compaction and restores state after newer compaction", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Before compaction" });
+  harness.compact(false, "older-compaction");
+  harness.startContextWindow("after-compaction");
+  assert.equal(harness.emit("before_agent_start", {}), undefined);
+
+  await harness.execute({ action: "add", text: "Inside window" });
+  harness.compact(false, "inside-window-compaction");
+  assert.equal(harness.sent.length, 1);
+  assert.match(harness.sent[0]!.message.content, /#1 Before compaction/);
+  assert.match(harness.sent[0]!.message.content, /#2 Inside window/);
+  assert.equal(harness.emit("before_agent_start", {}), undefined);
+});
+
 test("ordinary compaction injects live state only on its active branch", async () => {
   const empty = createExtensionHarness();
   empty.compact(false, "compaction-empty");
@@ -660,7 +800,7 @@ test("overflow compaction immediately steers the current todo state", async () =
 
   assert.equal(harness.sent.length, 1);
   assert.match(harness.sent[0]!.message.content, /TODO: 0 active, 1 pending, 0 completed/);
-  assert.deepEqual(harness.sent[0]!.options, { deliverAs: "steer", triggerTurn: false });
+  assert.deepEqual(harness.sent[0]!.options, { deliverAs: "steer" });
   // Overflow retries use agent.continue() in Pi 0.84.1; guard against duplicate context if that lifecycle changes.
   assert.equal(harness.emit("before_agent_start", {}), undefined);
 });

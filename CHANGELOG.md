@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0] - 2026-09-02
+
+### Fixed
+
+- Restore the exact boundary-time todo snapshot after a native context-window cut and keep it stable across later mutations in that window.
+- Preserve empty todo history as `No todos` while keeping initial windows and sessions without todo history free of injected context.
+- Ignore older compaction state at native window boundaries, restore live state after later in-window compaction, and avoid duplicate todo context.
+
 ## [0.5.0] - 2026-08-19
 
 ### Changed
