@@ -1,5 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ContextEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   applyTodoBatch,
@@ -124,13 +124,12 @@ function replayLog(state: TodoState, operations: TodoMutation[]): void {
   for (const operation of operations) applyTodoMutation(state, operation);
 }
 
-function restore(ctx: ExtensionContext): { state: TodoState; recoveryNeeded: boolean } {
-  const branch = ctx.sessionManager.getBranch();
+function restore(branch: BranchEntry[], endIndex = branch.length): { state: TodoState; recoveryNeeded: boolean } {
   let restored = emptyState();
   let checkpointIndex = -1;
   let restoreStopped = false;
 
-  for (let index = branch.length - 1; index >= 0; index -= 1) {
+  for (let index = endIndex - 1; index >= 0; index -= 1) {
     const details = entryDetails(branch[index]!);
     if (!isSnapshot(details)) continue;
     const checkpoint = validatedSnapshot(details);
@@ -145,7 +144,7 @@ function restore(ctx: ExtensionContext): { state: TodoState; recoveryNeeded: boo
 
   const base = cloneState(restored);
   const appliedLogs: TodoMutation[][] = [];
-  for (let index = checkpointIndex + 1; index < branch.length; index += 1) {
+  for (let index = checkpointIndex + 1; index < endIndex; index += 1) {
     const details = entryDetails(branch[index]!);
     if (details === NOT_TODO_RESULT || details === NO_TODO_CHANGE) continue;
     if (isReadMarker(details)) continue;
@@ -168,7 +167,6 @@ function restore(ctx: ExtensionContext): { state: TodoState; recoveryNeeded: boo
     }
   }
 
-  if (restoreStopped && ctx.hasUI) ctx.ui.notify("Todo restore stopped at corrupt session data; later changes were not replayed.", "warning");
   return { state: restored, recoveryNeeded: restoreStopped };
 }
 
@@ -176,10 +174,11 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
   let recoveryNeeded = false;
   let widgetVisible = process.env.PI_TODO_WIDGET?.trim().toLowerCase() === "show";
+  let windowContext: { id: string; message: ContextEvent["messages"][number] | null } | undefined;
 
-  const todoContextMessage = () => ({
+  const todoContextMessage = (snapshot = state) => ({
     customType: TODO_CONTEXT_TYPE,
-    content: `[TODO LIST - state after compaction]\n${formatTodoContext(state)}\nKeep this list current with todo_list.`,
+    content: `[TODO LIST - state after compaction]\n${formatTodoContext(snapshot)}\nKeep this list current with todo_list.`,
     display: false,
   });
 
@@ -188,6 +187,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     for (let index = branch.length - 1; index >= 0; index -= 1) {
       const entry = branch[index]!;
       if (entry.type === "custom_message" && entry.customType === TODO_CONTEXT_TYPE) return false;
+      if ((entry as { type: string }).type === "context_window") return false;
       if (entry.type === "compaction") return true;
     }
     return false;
@@ -221,9 +221,11 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   };
 
   const rehydrate = (ctx: ExtensionContext): void => {
-    const restored = restore(ctx);
+    windowContext = undefined;
+    const restored = restore(ctx.sessionManager.getBranch());
     state = restored.state;
     recoveryNeeded = restored.recoveryNeeded;
+    if (recoveryNeeded && ctx.hasUI) ctx.ui.notify("Todo restore stopped at corrupt session data; later changes were not replayed.", "warning");
     updateWidget(ctx);
   };
 
@@ -232,11 +234,46 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => rehydrate(ctx));
   pi.on("session_tree", (_event, ctx) => rehydrate(ctx));
 
-  // Overflow compaction immediately retries the active run. Other compactions
-  // are detected from the active branch when its next agent turn starts.
-  pi.on("session_compact", (event) => {
-    if (event.willRetry && hasTodoHistory()) {
-      pi.sendMessage(todoContextMessage(), { deliverAs: "steer", triggerTurn: false });
+  pi.on("context", (event, ctx) => {
+    if (event.messages.some((message) => message.role === "custom" && message.customType === TODO_CONTEXT_TYPE)) return;
+    const markerIndex = event.messages.findIndex((message) =>
+      message.role === "custom"
+      && message.customType === "context-window"
+      && message.details !== null
+      && typeof message.details === "object"
+      && typeof (message.details as { windowId?: unknown }).windowId === "string"
+    );
+    if (markerIndex < 0) return;
+
+    const marker = event.messages[markerIndex] as ContextEvent["messages"][number] & { details: { windowId: string } };
+    const windowId = marker.details.windowId;
+    if (windowContext?.id !== windowId) {
+      const branch = ctx.sessionManager.getBranch();
+      const boundaryIndex = branch.findIndex((entry) =>
+        (entry as { type: string }).type === "context_window" && entry.id === windowId
+      );
+      if (boundaryIndex < 0) return;
+      const snapshot = restore(branch, boundaryIndex).state;
+      windowContext = {
+        id: windowId,
+        message: snapshot.items.length > 0 || snapshot.nextId > 1
+          ? { role: "custom", ...todoContextMessage(snapshot), timestamp: marker.timestamp }
+          : null,
+      };
+    }
+    const message = windowContext?.message;
+    if (!message) return;
+    return { messages: [...event.messages.slice(0, markerIndex + 1), structuredClone(message), ...event.messages.slice(markerIndex + 1)] };
+  });
+
+  // A later compaction drops a native window's transient marker and snapshot.
+  // Queue live state immediately for that window, or for an overflow retry.
+  pi.on("session_compact", (event, ctx) => {
+    const inNativeWindow = ctx.sessionManager.getBranch().some((entry) =>
+      (entry as { type: string }).type === "context_window"
+    );
+    if ((event.willRetry || inNativeWindow) && hasTodoHistory()) {
+      pi.sendMessage(todoContextMessage(), { deliverAs: "steer" });
     }
   });
 

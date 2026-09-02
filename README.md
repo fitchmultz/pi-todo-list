@@ -7,7 +7,7 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 - Nested items with recursive completion and deletion
 - Paginated open-work listing plus an opt-in TUI widget and `/todos` controls
 - Session-local, branch-aware persistence through tool result details
-- Survives compaction, resume, fork, and tree navigation
+- Survives compaction, native context windows, resume, fork, and tree navigation
 
 ## Requirements
 
@@ -16,7 +16,7 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 ## Install
 
 ```bash
-pi install git:github.com/fitchmultz/pi-todo-list@v0.5.0
+pi install git:github.com/fitchmultz/pi-todo-list@v0.6.0
 ```
 
 For local development:
@@ -39,11 +39,11 @@ Then ask the agent to track the work. It will list todos when starting or resumi
 
 ## Caching
 
-The tool definition and system-prompt guidance are static. Mutations return only the change and status counts. After compaction, the extension injects one bounded active/pending summary when the active branch's retry or next agent turn starts, so later mutations cannot stale it and the provider-cacheable conversation prefix stays intact.
+The tool definition and system-prompt guidance are static. Mutations return only the change and status counts. Initial windows and ordinary requests add no todo context. After compaction, the extension injects one bounded active/pending summary for the retry or next request; inside a native window it queues the summary as soon as a later compaction replaces the window marker. At a native boundary, it injects the boundary-time snapshot immediately after Pi's marker and reuses that exact message for the rest of the window. Later mutations therefore cannot stale the provider-cacheable prefix.
 
 ## State behavior
 
-Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume replays those mutations on the active branch, using legacy version 1 and 2 snapshots when present. If restore encounters corrupt history, it warns, preserves the contiguous valid state, and writes one recovery checkpoint on the next successful `todo_list` call. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
+Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume and tree navigation replay those mutations on the active branch, using legacy version 1 and 2 snapshots when present. Native context-window snapshots are rebuilt from entries before their matching boundary, including an empty list that has prior todo history. If restore encounters corrupt history, it warns, preserves the contiguous valid state, and writes one recovery checkpoint on the next successful `todo_list` call. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
 
 Do not reopen a version 0.3 or later session with an older extension release; older versions do not understand mutation logs.
 
