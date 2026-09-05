@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import todoListExtension from "../extensions/todo-list.ts";
 import {
   addTodo,
@@ -245,7 +248,7 @@ test("list pages and compaction context stay bounded", () => {
   assert.doesNotMatch(context, /- #56 /);
 });
 
-function createExtensionHarness() {
+function createExtensionHarness(sessionManager?: SessionManager) {
   type Handler = (...args: any[]) => any;
   type Tool = { execute: (...args: any[]) => Promise<unknown>; executionMode?: string };
   type Command = { handler: (args: string, ctx: any) => Promise<void> };
@@ -275,7 +278,7 @@ function createExtensionHarness() {
       setStatus(_key: string, text: string | undefined) { statusUpdates.push(text); },
       notify(message: string) { notifications.push(message); },
     },
-    sessionManager: { getBranch: () => branch },
+    sessionManager: sessionManager ?? { getBranch: () => branch },
   };
   let tool: Tool | undefined;
   let command: Command | undefined;
@@ -344,19 +347,150 @@ function createExtensionHarness() {
         branch.push({ type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } });
         return undefined;
       }
-      branch.push({
-        type: "message",
-        message: {
-          role: "toolResult",
-          toolName: "todo_list",
-          details: (result as { details?: unknown }).details,
-        },
-      });
-      return result;
+      const returned = result as { content: Array<{ type: "text"; text: string }>; details?: unknown };
+      const message = {
+        role: "toolResult" as const,
+        toolCallId: "test-call",
+        toolName: "todo_list",
+        content: returned.content,
+        details: returned.details,
+        isError: false,
+        timestamp: Date.now(),
+      };
+      if (sessionManager) sessionManager.appendMessage(message);
+      else branch.push({ type: "message", message });
+      return returned;
     },
     emit,
   };
 }
+
+test("clear_completed receipts identify nested items and surviving parents in standalone and batch results", async () => {
+  for (const batch of [false, true]) {
+    const manager = SessionManager.inMemory();
+    const harness = createExtensionHarness(manager);
+    await harness.execute({ action: "batch", operations: [
+      { action: "add", text: "Moved child" },
+      { action: "add", text: "Surviving parent" },
+      { action: "add", text: "Completed parent", parentId: 2 },
+      { action: "add", text: "Completed child", parentId: 3 },
+      { action: "move", id: 1, parentId: 3 },
+      { action: "add", text: "Completed root (under #99)" },
+      { action: "complete", id: 3 },
+      { action: "complete", id: 5 },
+    ] });
+    const listed = await harness.execute({ action: "list" });
+    assert.equal(listed?.content[0]?.text, "TODO: 0 active, 1 pending, 4 completed\n- #2 Surviving parent\n… 4 completed not shown");
+    const params = batch ? { action: "batch", operations: [{ action: "clear_completed" }] } : { action: "clear_completed" };
+    const result = await harness.execute(params);
+    assert.equal(result?.content[0]?.text, [
+      ...(batch ? ["Applied 1 operation(s):"] : []),
+      `${batch ? "- " : ""}Removed 4 completed item(s)`,
+      "x #1 (under #3): Moved child",
+      "x #3 (under #2): Completed parent",
+      "x #4 (under #3): Completed child",
+      "x #5: Completed root (under #99)",
+      "TODO: 0 active, 1 pending, 0 completed",
+    ].join("\n"));
+    assert.deepEqual(JSON.parse(JSON.stringify(result?.details)), { version: 3, operations: [{ action: "clear_completed" }] });
+    const modelMessage = manager.buildSessionContext().messages.at(-1);
+    assert.equal(modelMessage?.role, "toolResult");
+    assert.deepEqual(modelMessage?.content, result?.content);
+    assert.deepEqual(harness.notifications, [], "cleanup does not add an interactive confirmation");
+    assert.equal((await harness.execute(params))?.content[0]?.text,
+      `${batch ? "Applied 1 operation(s):\n- " : ""}Removed 0 completed item(s)\nTODO: 0 active, 1 pending, 0 completed`);
+  }
+});
+
+test("clear_completed receipts retain every full identity beyond one list page and deep render limits", async () => {
+  const manager = SessionManager.inMemory();
+  const harness = createExtensionHarness(manager);
+  const text = "x".repeat(TODO_TEXT_LIMIT);
+  const operations = Array.from({ length: 130 }, (_, index) => ({
+    action: "add", text, ...(index === 0 ? {} : { parentId: index }),
+  }));
+  await harness.execute({ action: "batch", operations: operations.slice(0, 100) });
+  await harness.execute({ action: "batch", operations: operations.slice(100) });
+  await harness.execute({ action: "complete", id: 1 });
+  const result = await harness.execute({ action: "clear_completed" });
+  assert.equal(result?.content[0]?.text, [
+    "Removed 130 completed item(s)",
+    ...operations.map((_, index) => `x #${index + 1}${index === 0 ? "" : ` (under #${index})`}: ${text}`),
+    "TODO: 0 active, 0 pending, 0 completed",
+  ].join("\n"));
+  const modelMessage = manager.buildSessionContext().messages.at(-1);
+  assert.equal(modelMessage?.role, "toolResult");
+  assert.deepEqual(modelMessage.content, result?.content);
+  assert.equal((await harness.execute({ action: "list" }))?.content[0]?.text, "No todos");
+});
+
+test("clear_completed batch receipts follow mutations and preserve rollback, IDs and native session replay", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-todo-receipts-"));
+  try {
+    const manager = SessionManager.create(directory, directory);
+    // Native persistence starts with the first assistant message; no model call is needed.
+    manager.appendMessage({ role: "assistant", content: [], api: "openai-responses", provider: "openai", model: "fixture",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop", timestamp: 1 });
+    const harness = createExtensionHarness(manager);
+    await harness.execute({ action: "batch", operations: [
+      { action: "add", text: "Surviving parent" },
+      { action: "add", text: "Original child", parentId: 1 },
+      { action: "complete", id: 2 },
+    ] });
+    const beforeCleanup = manager.getLeafId()!;
+    const operations = [
+      { action: "clear_completed" },
+      { action: "add", text: "Replacement", parentId: 1 },
+      { action: "update", id: 3, text: "Renamed replacement" },
+      { action: "complete", id: 3 },
+      { action: "clear_completed" },
+      { action: "clear_completed" },
+    ];
+    const result = await harness.execute({ action: "batch", operations });
+    assert.equal(result?.content[0]?.text, [
+      "Applied 6 operation(s):",
+      "- Removed 1 completed item(s)",
+      "x #2 (under #1): Original child",
+      "- Added #3: Replacement",
+      "- Updated #3: Renamed replacement",
+      "- Completed #3",
+      "- Removed 1 completed item(s)",
+      "x #3 (under #1): Renamed replacement",
+      "- Removed 0 completed item(s)",
+      "TODO: 0 active, 1 pending, 0 completed",
+    ].join("\n"));
+    assert.deepEqual(result?.details, { version: 3, operations });
+    const afterCleanup = manager.getLeafId()!;
+    const sessionFile = manager.getSessionFile()!;
+    const beforeFailure = readFileSync(sessionFile, "utf8");
+    await assert.rejects(harness.execute({ action: "batch", operations: [
+      { action: "complete", id: 1 },
+      { action: "clear_completed" },
+      { action: "add", text: "Rolled back" },
+      { action: "remove", id: 999 },
+    ] }), /^Error: Batch operation 4 \(remove\) failed: Todo #999 not found\. No changes applied\.$/);
+    assert.equal(readFileSync(sessionFile, "utf8"), beforeFailure, "failed cleanup returns no receipt or persisted mutation");
+    assert.equal((await harness.execute({ action: "add", text: "Next ID" }))?.content[0]?.text,
+      "Added #4: Next ID\nTODO: 0 active, 2 pending, 0 completed");
+
+    const reopened = SessionManager.open(sessionFile, directory);
+    const resumed = createExtensionHarness(reopened);
+    resumed.emit("session_start", {});
+    assert.equal((await resumed.execute({ action: "list" }))?.content[0]?.text,
+      "TODO: 0 active, 2 pending, 0 completed\n- #1 Surviving parent\n- #4 Next ID");
+    reopened.branch(beforeCleanup);
+    resumed.emit("session_tree", {});
+    assert.equal((await resumed.execute({ action: "clear_completed" }))?.content[0]?.text,
+      "Removed 1 completed item(s)\nx #2 (under #1): Original child\nTODO: 0 active, 1 pending, 0 completed");
+    reopened.branch(afterCleanup);
+    resumed.emit("session_tree", {});
+    assert.equal((await resumed.execute({ action: "add", text: "Branch ID" }))?.content[0]?.text,
+      "Added #4: Branch ID\nTODO: 0 active, 2 pending, 0 completed");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 const contextWindowMarker = (windowId: string) => ({
   role: "custom",
@@ -425,6 +559,8 @@ test("native context keeps one byte-stable boundary snapshot after later mutatio
   const firstBytes = JSON.stringify(first.messages[1]);
   first.messages[1]!.content = "downstream mutation";
 
+  await harness.execute({ action: "complete", id: 1 });
+  assert.match((await harness.execute({ action: "clear_completed" }))?.content[0]?.text ?? "", /x #1: Before boundary/);
   await harness.execute({ action: "add", text: "After boundary" });
   const repeated = harness.emit("context", { messages: [marker, userMessage("Later request")] }) as {
     messages: Array<Record<string, unknown>>;

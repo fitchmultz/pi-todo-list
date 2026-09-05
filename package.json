@@ -1,6 +1,6 @@
 {
   "name": "@fitchmultz/pi-todo-list",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "A persistent, nested todo list for Pi agents",
   "author": "Mitch Fultz (https://github.com/fitchmultz)",
   "type": "module",

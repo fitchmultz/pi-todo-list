@@ -16,7 +16,7 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 ## Install
 
 ```bash
-pi install git:github.com/fitchmultz/pi-todo-list@v0.6.0
+pi install git:github.com/fitchmultz/pi-todo-list@v0.6.1
 ```
 
 For local development:
@@ -34,6 +34,8 @@ pi -e ./extensions/todo-list.ts
 Then ask the agent to track the work. It will list todos when starting or resuming, mark items in progress, and leave nothing open when it reports the work finished. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
 
 `list` returns up to 100 open items and counts the completed ones in its header, matching the widget and the post-compaction summary. Use its zero-based `offset` and optional `limit` to continue through larger lists.
+
+`clear_completed` returns a one-time receipt with every removed item's ID, full text, and parent ID when nested, ordered by ID. This also applies inside a successful batch. Receipts are not paginated or truncated; ordinary listing and context still omit completed items.
 
 `/todos` shows the first page of open items and `/todos all` adds the completed ones with their text, up to 100 rows, since a human reading the terminal pays no tokens for them. `list` no longer returns completed items, so pass an id along from `/todos all` when you want one reopened and the agent no longer has it in context. `/todos toggle`, `/todos show`, and `/todos hide` control the widget. The widget starts hidden, and the footer status reports active and pending counts. Set `PI_TODO_WIDGET=show` to start it visible instead.
 

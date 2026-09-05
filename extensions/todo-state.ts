@@ -272,8 +272,11 @@ export function applyTodoMutation(state: TodoState, operation: TodoMutation): st
       const count = removeTodo(state, id);
       return `Removed #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}`;
     }
-    case "clear_completed":
-      return `Removed ${clearCompleted(state)} completed item(s)`;
+    case "clear_completed": {
+      const removed = state.items.filter((todo) => todo.status === "completed").sort((a, b) => a.id - b.id);
+      const receipt = removed.map((todo) => `x #${todo.id}${todo.parentId === undefined ? "" : ` (under #${todo.parentId})`}: ${todo.text}`);
+      return [`Removed ${clearCompleted(state)} completed item(s)`, ...receipt].join("\n");
+    }
   }
   throw new Error(`Unknown todo action: ${String((operation as { action?: unknown }).action)}`);
 }
