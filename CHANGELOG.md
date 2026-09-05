@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.1] - 2026-09-05
+
+### Fixed
+
+- Include every removed item's ID, full text, and parent association in `clear_completed` results, including successful batches, without adding completed items to normal listings or context.
+
 ## [0.6.0] - 2026-09-02
 
 ### Fixed
