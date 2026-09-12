@@ -1,10 +1,11 @@
-export type TodoStatus = "pending" | "in_progress" | "completed";
+export type TodoStatus = "pending" | "in_progress" | "paused" | "completed";
 
 export interface TodoItem {
   id: number;
   text: string;
   status: TodoStatus;
   parentId?: number;
+  link?: string;
 }
 
 export interface TodoState {
@@ -29,14 +30,16 @@ export interface TodoMutation {
   id?: number;
   text?: string;
   parentId?: number;
+  link?: string | null;
 }
 
-const TODO_STATUSES: readonly TodoStatus[] = ["pending", "in_progress", "completed"];
+const TODO_STATUSES: readonly TodoStatus[] = ["pending", "in_progress", "paused", "completed"];
 const CONTROL_CHARACTERS = /(?:[\u0000-\u001f\u007f-\u009f]|\p{Bidi_Control})+/gu;
-const CONTEXT_ITEMS_PER_STATUS = 25;
+const CONTEXT_ITEMS_PER_STATUS = 5;
 const CONTEXT_TEXT_LENGTH = 160;
 export const LIST_PAGE_LIMIT = 100;
 export const TODO_TEXT_LIMIT = 240;
+export const TODO_LINK_LIMIT = 2048;
 const MAX_RENDER_DEPTH = 12;
 
 export const emptyState = (): TodoState => ({ items: [], nextId: 1 });
@@ -69,7 +72,8 @@ export function cloneState(state: TodoState): TodoState {
     }
 
     ids.add(raw.id);
-    return { id: raw.id, text, status, ...(raw.parentId === undefined ? {} : { parentId: raw.parentId }) };
+    const link = normalizeLink(raw.link);
+    return { id: raw.id, text, status, ...(raw.parentId === undefined ? {} : { parentId: raw.parentId }), ...(link === undefined ? {} : { link }) };
   });
 
   const byId = new Map(items.map((todo) => [todo.id, todo]));
@@ -106,11 +110,17 @@ function item(state: TodoState, id: number): TodoItem {
   return found;
 }
 
-function concise(text: string): string {
+function concise(text: string, limit = TODO_TEXT_LIMIT, field = "text"): string {
   const value = text.replace(CONTROL_CHARACTERS, " ").trim();
-  if (!value) throw new Error("Todo text cannot be empty");
-  if ([...value].length > TODO_TEXT_LIMIT) throw new Error(`Todo text cannot exceed ${TODO_TEXT_LIMIT} characters`);
+  if (!value) throw new Error(`Todo ${field} cannot be empty`);
+  if ([...value].length > limit) throw new Error(`Todo ${field} cannot exceed ${limit} characters`);
   return value;
+}
+
+function normalizeLink(link: string | null | undefined): string | undefined {
+  if (link === undefined || link === null) return undefined;
+  if (typeof link !== "string") throw new Error("Todo link must be a URL or note/file path");
+  return concise(link, TODO_LINK_LIMIT, "link");
 }
 
 function descendants(state: TodoState, id: number): Set<number> {
@@ -154,18 +164,24 @@ function reopenCompleted(ancestors: TodoItem[]): void {
   for (const ancestor of ancestors) if (ancestor.status === "completed") ancestor.status = "pending";
 }
 
-export function addTodo(state: TodoState, text: string, parentId?: number): TodoItem {
+export function addTodo(state: TodoState, text: string, parentId?: number, link?: string | null): TodoItem {
   const value = concise(text);
+  const detailLink = normalizeLink(link);
   if (parentId !== undefined && item(state, parentId).status === "completed") throw new Error("Cannot add under a completed todo");
   if (!Number.isSafeInteger(state.nextId) || state.nextId < 1 || state.nextId >= Number.MAX_SAFE_INTEGER) throw new Error("Todo id limit reached");
-  const added = { id: state.nextId++, text: value, status: "pending" as const, ...(parentId === undefined ? {} : { parentId }) };
+  const added = { id: state.nextId++, text: value, status: "pending" as const, ...(parentId === undefined ? {} : { parentId }), ...(detailLink === undefined ? {} : { link: detailLink }) };
   state.items.push(added);
   return added;
 }
 
-export function updateTodo(state: TodoState, id: number, text: string): TodoItem {
+export function updateTodo(state: TodoState, id: number, text?: string, link?: string | null): TodoItem {
+  if (text === undefined && link === undefined) throw new Error("text or link is required for update");
   const found = item(state, id);
-  found.text = concise(text);
+  const value = text === undefined ? found.text : concise(text);
+  const detailLink = link === undefined ? found.link : normalizeLink(link);
+  found.text = value;
+  if (detailLink === undefined) delete found.link;
+  else found.link = detailLink;
   return found;
 }
 
@@ -193,7 +209,7 @@ export function startTodo(state: TodoState, id: number): TodoItem {
 export function pauseTodo(state: TodoState, id: number): TodoItem {
   const target = item(state, id);
   const ancestors = ancestorChain(state, target);
-  target.status = "pending";
+  target.status = "paused";
   reopenCompleted(ancestors);
   return target;
 }
@@ -238,11 +254,11 @@ function requiredText(operation: TodoMutation): string {
 export function applyTodoMutation(state: TodoState, operation: TodoMutation): string {
   switch (operation.action) {
     case "add": {
-      const todo = addTodo(state, requiredText(operation), operation.parentId);
+      const todo = addTodo(state, requiredText(operation), operation.parentId, operation.link);
       return `Added #${todo.id}: ${todo.text}`;
     }
     case "update": {
-      const todo = updateTodo(state, requiredId(operation), requiredText(operation));
+      const todo = updateTodo(state, requiredId(operation), operation.text, operation.link);
       return `Updated #${todo.id}: ${todo.text}`;
     }
     case "move": {
@@ -274,7 +290,7 @@ export function applyTodoMutation(state: TodoState, operation: TodoMutation): st
     }
     case "clear_completed": {
       const removed = state.items.filter((todo) => todo.status === "completed").sort((a, b) => a.id - b.id);
-      const receipt = removed.map((todo) => `x #${todo.id}${todo.parentId === undefined ? "" : ` (under #${todo.parentId})`}: ${todo.text}`);
+      const receipt = removed.map((todo) => `x #${todo.id}${todo.parentId === undefined ? "" : ` (under #${todo.parentId})`}: ${todo.text}${todo.link ? `\n  Details: ${todo.link}` : ""}`);
       return [`Removed ${clearCompleted(state)} completed item(s)`, ...receipt].join("\n");
     }
   }
@@ -333,11 +349,12 @@ export function orderedTodos(
   return ordered;
 }
 
-export function todoCounts(state: TodoState): { pending: number; inProgress: number; completed: number } {
-  const counts = { pending: 0, inProgress: 0, completed: 0 };
+export function todoCounts(state: TodoState): { pending: number; inProgress: number; paused: number; completed: number } {
+  const counts = { pending: 0, inProgress: 0, paused: 0, completed: 0 };
   for (const todo of state.items) {
     if (todo.status === "pending") counts.pending += 1;
     else if (todo.status === "in_progress") counts.inProgress += 1;
+    else if (todo.status === "paused") counts.paused += 1;
     else counts.completed += 1;
   }
   return counts;
@@ -345,24 +362,29 @@ export function todoCounts(state: TodoState): { pending: number; inProgress: num
 
 export function formatTodoCounts(state: TodoState): string {
   const counts = todoCounts(state);
-  return `TODO: ${counts.inProgress} active, ${counts.pending} pending, ${counts.completed} completed`;
+  return `TODO: ${counts.inProgress} active, ${counts.pending} pending${counts.paused ? `, ${counts.paused} paused` : ""}, ${counts.completed} completed`;
 }
 
 export function formatRows(rows: Array<{ item: TodoItem; depth: number }>): string {
   return rows
     .map(({ item: todo, depth }) => {
-      const marker = todo.status === "in_progress" ? ">" : todo.status === "completed" ? "x" : "-";
+      const marker = todo.status === "in_progress" ? ">" : todo.status === "paused" ? "⏸" : todo.status === "completed" ? "x" : "-";
       const indent = `${"  ".repeat(Math.min(depth, MAX_RENDER_DEPTH))}${depth > MAX_RENDER_DEPTH ? "… " : ""}`;
-      return `${indent}${marker} #${todo.id} ${todo.text}`;
+      return `${indent}${marker} #${todo.id} ${todo.text}${todo.link ? " [details]" : ""}`;
     })
     .join("\n");
+}
+
+export function formatTodoDetail(state: TodoState, id: number): string {
+  const todo = item(state, id);
+  return `#${todo.id} ${todo.text}\nStatus: ${todo.status.replace("_", " ")}${todo.parentId === undefined ? "" : `\nParent: #${todo.parentId}`}${todo.link ? `\nDetails: ${todo.link}` : ""}`;
 }
 
 export function formatTodoPage(state: TodoState, offset = 0, limit = LIST_PAGE_LIMIT): string {
   if (state.items.length === 0) return "No todos";
   const header = formatTodoCounts(state);
   const counts = todoCounts(state);
-  const open = counts.inProgress + counts.pending;
+  const open = counts.inProgress + counts.pending + counts.paused;
   if (open === 0) return header;
 
   const start = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
@@ -383,21 +405,17 @@ function shorten(text: string): string {
 
 export function formatTodoContext(state: TodoState): string {
   if (state.items.length === 0) return "No todos";
-  const counts = todoCounts(state);
-  const active = state.items.filter((todo) => todo.status === "in_progress").sort((a, b) => a.id - b.id);
-  const pending = state.items.filter((todo) => todo.status === "pending").sort((a, b) => a.id - b.id);
-  const shown = [...active.slice(0, CONTEXT_ITEMS_PER_STATUS), ...pending.slice(0, CONTEXT_ITEMS_PER_STATUS)];
-  if (shown.length === 0) return formatTodoCounts(state);
-
-  const lines = shown.map((todo) => {
-    const marker = todo.status === "in_progress" ? ">" : "-";
-    return `${marker} #${todo.id} ${shorten(todo.text)}${todo.parentId === undefined ? "" : ` (under #${todo.parentId})`}`;
-  });
-  const hiddenActive = counts.inProgress - Math.min(counts.inProgress, CONTEXT_ITEMS_PER_STATUS);
-  const hiddenPending = counts.pending - Math.min(counts.pending, CONTEXT_ITEMS_PER_STATUS);
-  if (hiddenActive + hiddenPending > 0) {
-    const hidden = [hiddenActive > 0 ? `${hiddenActive} active` : "", hiddenPending > 0 ? `${hiddenPending} pending` : ""].filter(Boolean).join(" and ");
-    lines.push(`… ${hidden} not shown; use todo_list list to page through the open items`);
-  }
-  return `${formatTodoCounts(state)}\n${lines.join("\n")}`;
+  const groups = [["in_progress", "active"], ["pending", "pending"], ["paused", "paused"]].map(([status, label]) => ({
+    label,
+    items: state.items.filter((todo) => todo.status === status).sort((a, b) => a.id - b.id),
+  }));
+  const shown = groups.flatMap((group) => group.items.slice(0, CONTEXT_ITEMS_PER_STATUS));
+  const lines = shown.map((todo) =>
+    `${formatRows([{ item: { ...todo, text: shorten(todo.text) }, depth: 0 }])}${todo.parentId === undefined ? "" : ` (under #${todo.parentId})`}`
+  );
+  const hidden = groups.filter((group) => group.items.length > CONTEXT_ITEMS_PER_STATUS)
+    .map((group) => `${group.items.length - CONTEXT_ITEMS_PER_STATUS} ${group.label}`);
+  if (hidden.length > 0) lines.push(`… ${hidden.join(" and ")} not shown; use todo_list list to page through the open items`);
+  if (shown.some((todo) => todo.link)) lines.push("Use todo_list list with id for detail links.");
+  return [formatTodoCounts(state), ...lines].join("\n");
 }

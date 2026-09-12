@@ -8,6 +8,7 @@ import {
   emptyState,
   formatTodoContext,
   formatTodoCounts,
+  formatTodoDetail,
   formatRows,
   formatTodoPage,
   orderedTodos,
@@ -15,14 +16,15 @@ import {
   LIST_PAGE_LIMIT,
   TODO_MUTATIONS,
   TODO_TEXT_LIMIT,
+  TODO_LINK_LIMIT,
   type TodoMutation,
   type TodoState,
 } from "./todo-state.ts";
 
 const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
 const TODO_CONTEXT_TYPE = "todo-list-context";
-const DETAILS_VERSION = 3;
-const RECOVERY_VERSION = 4;
+const DETAILS_VERSION = 5;
+const RECOVERY_VERSION = 6;
 const BATCH_OPERATION_LIMIT = 100;
 const WIDGET_LIMIT = 8;
 
@@ -32,29 +34,36 @@ interface LegacySnapshotDetails {
   state: unknown;
 }
 interface RecoveryDetails {
-  version: 4;
+  version: 4 | 6;
   state: unknown;
 }
 type SnapshotDetails = LegacySnapshotDetails | RecoveryDetails;
 interface MutationDetails {
-  version: 3;
+  version: 3 | 5;
   operations: TodoMutation[];
 }
 interface ReadDetails {
-  version: 3;
+  version: 3 | 5;
   read: "list";
 }
+const Link = Type.Optional(Type.Union([
+  Type.String({ minLength: 1, maxLength: TODO_LINK_LIMIT }),
+  Type.Null(),
+], { description: "URL or note/file path for details on add or update; null clears it. Keep evidence out of the title" }));
+
 const Mutation = Type.Object({
   action: StringEnum(TODO_MUTATIONS),
   id: Type.Optional(Type.Integer({ minimum: 1 })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT })),
+  link: Link,
   parentId: Type.Optional(Type.Integer({ minimum: 1 })),
 });
 
 const Params = Type.Object({
   action: StringEnum(ACTIONS),
-  id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID for update, move, start, pause, complete, reopen, or remove" })),
-  text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT, description: "Concise todo text for add or update" })),
+  id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID for list (one item with its detail link), update, move, start, pause, complete, reopen, or remove" })),
+  text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT, description: "Short action title for add or update; put hashes, logs, and evidence in the linked details" })),
+  link: Link,
   parentId: Type.Optional(Type.Integer({ minimum: 1, description: "Parent todo ID for add or move; omit on move to make it top-level" })),
   operations: Type.Optional(Type.Array(Mutation, { minItems: 1, maxItems: BATCH_OPERATION_LIMIT, description: "Required for batch. Ordered mutations applied atomically" })),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based offset into the open items" })),
@@ -80,7 +89,7 @@ function hasExactKeys(value: object, keys: readonly string[]): boolean {
 function isSnapshot(details: unknown): details is SnapshotDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; action?: unknown };
-  if (candidate.version === RECOVERY_VERSION) return hasExactKeys(details, ["version", "state"]);
+  if (candidate.version === 4 || candidate.version === RECOVERY_VERSION) return hasExactKeys(details, ["version", "state"]);
   return (candidate.version === 1 || candidate.version === 2)
     && typeof candidate.action === "string"
     && hasExactKeys(details, ["version", "action", "state"]);
@@ -89,7 +98,7 @@ function isSnapshot(details: unknown): details is SnapshotDetails {
 function isMutationLog(details: unknown): details is MutationDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; operations?: unknown };
-  return candidate.version === DETAILS_VERSION
+  return (candidate.version === 3 || candidate.version === DETAILS_VERSION)
     && Array.isArray(candidate.operations)
     && candidate.operations.length > 0
     && candidate.operations.length <= BATCH_OPERATION_LIMIT
@@ -99,7 +108,7 @@ function isMutationLog(details: unknown): details is MutationDetails {
 function isReadMarker(details: unknown): details is ReadDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; read?: unknown };
-  return candidate.version === DETAILS_VERSION && candidate.read === "list" && hasExactKeys(details, ["version", "read"]);
+  return (candidate.version === 3 || candidate.version === DETAILS_VERSION) && candidate.read === "list" && hasExactKeys(details, ["version", "read"]);
 }
 
 function validatedSnapshot(details: SnapshotDetails): TodoState | undefined {
@@ -120,8 +129,12 @@ function validatedSnapshot(details: SnapshotDetails): TodoState | undefined {
   }
 }
 
-function replayLog(state: TodoState, operations: TodoMutation[]): void {
-  for (const operation of operations) applyTodoMutation(state, operation);
+function replayLog(state: TodoState, log: MutationDetails): void {
+  for (const operation of log.operations) {
+    applyTodoMutation(state, operation);
+    // Before v5, pause meant pending. Preserve the state of those older branches.
+    if (log.version === 3 && operation.action === "pause") state.items.find((todo) => todo.id === operation.id)!.status = "pending";
+  }
 }
 
 function restore(branch: BranchEntry[], endIndex = branch.length): { state: TodoState; recoveryNeeded: boolean } {
@@ -143,7 +156,7 @@ function restore(branch: BranchEntry[], endIndex = branch.length): { state: Todo
   }
 
   const base = cloneState(restored);
-  const appliedLogs: TodoMutation[][] = [];
+  const appliedLogs: MutationDetails[] = [];
   for (let index = checkpointIndex + 1; index < endIndex; index += 1) {
     const details = entryDetails(branch[index]!);
     if (details === NOT_TODO_RESULT || details === NO_TODO_CHANGE) continue;
@@ -153,12 +166,12 @@ function restore(branch: BranchEntry[], endIndex = branch.length): { state: Todo
       break;
     }
     try {
-      replayLog(restored, details.operations);
-      appliedLogs.push(details.operations);
+      replayLog(restored, details);
+      appliedLogs.push(details);
     } catch {
       try {
         restored = cloneState(base);
-        for (const operations of appliedLogs) replayLog(restored, operations);
+        for (const log of appliedLogs) replayLog(restored, log);
       } catch {
         restored = emptyState();
       }
@@ -178,7 +191,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
 
   const todoContextMessage = (snapshot = state) => ({
     customType: TODO_CONTEXT_TYPE,
-    content: `[TODO LIST - state after compaction]\n${formatTodoContext(snapshot)}\nKeep this list current with todo_list.`,
+    content: `[TODO LIST - recovery snapshot]\n${formatTodoContext(snapshot)}\nLater todo_list results supersede this snapshot.`,
     display: false,
   });
 
@@ -196,14 +209,14 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   const updateWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
     const counts = todoCounts(state);
-    const openCount = counts.inProgress + counts.pending;
+    const openCount = counts.inProgress + counts.pending + counts.paused;
     if (openCount === 0) {
       ctx.ui.setWidget("todo-list", undefined);
       ctx.ui.setStatus("todo-list", undefined);
       return;
     }
 
-    ctx.ui.setStatus("todo-list", ctx.ui.theme.fg("accent", `todo ${counts.inProgress} active · ${counts.pending} pending`));
+    ctx.ui.setStatus("todo-list", `todo ${counts.inProgress} active · ${counts.pending} pending${counts.paused ? ` · ${counts.paused} paused` : ""}`);
     if (!widgetVisible) {
       ctx.ui.setWidget("todo-list", undefined);
       return;
@@ -212,11 +225,12 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     const visible = orderedTodos(state, false, WIDGET_LIMIT);
     const lines = visible.map(({ item, depth }) => {
       const active = item.status === "in_progress";
+      const paused = item.status === "paused";
       // A row appears only once all of its ancestors have, so depth stays below
       // WIDGET_LIMIT here and never reaches the cap that paged output needs.
-      return `${"  ".repeat(depth)}${ctx.ui.theme.fg(active ? "accent" : "muted", active ? "◉" : "○")} ${ctx.ui.theme.fg("accent", `#${item.id}`)} ${item.text}`;
+      return `${"  ".repeat(depth)}${active ? "◉" : paused ? "⏸" : "○"} #${item.id} ${item.text}${item.link ? " [details]" : ""}`;
     });
-    if (openCount > visible.length) lines.push(ctx.ui.theme.fg("dim", `… ${openCount - visible.length} more`));
+    if (openCount > visible.length) lines.push(`… ${openCount - visible.length} more`);
     ctx.ui.setWidget("todo-list", lines);
   };
 
@@ -284,12 +298,13 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "todo_list",
     label: "Todo List",
-    description: "Manage a persistent nested todo list with pending, in-progress, and completed items, including atomic batches. list returns the open items and counts the completed ones",
-    promptSnippet: "Track persistent pending, in-progress, and completed work across context compaction",
+    description: "Manage persistent nested todos with pending, in-progress, paused, and completed states, including atomic batches. list shows open titles and counts; list with id shows one item and its detail link",
+    promptSnippet: "Track current work with short titles, detail links, and a distinct paused state across context compaction",
     promptGuidelines: [
       "Use todo_list at the start or resumption of multi-step work. Start items before working, complete them after verification, and pause interrupted work.",
-      "Keep todo_list items concise and batch related mutations into one call. Leave no item open when you report multi-step work finished; the counts in each result cover that without an extra call.",
-      "Starting, pausing, or reopening a nested todo reopens completed ancestors.",
+      "Use short action titles in todo_list; keep hashes, logs, and evidence in a linked note/file or URL via link. Use list with id to retrieve that link. When using notes, update one concise current summary in place: goal, current state, next step, blockers, and evidence links, not a running history.",
+      "Update stale todo_list titles and statuses when plans change; remove work that no longer applies. Batch related mutations. Leave no item open when you report multi-step work finished; the counts in each result cover that without an extra call.",
+      "Starting, pausing, or reopening a nested todo with todo_list reopens completed ancestors.",
     ],
     parameters: Params,
     // No executionMode: execute() never awaits, and one sequential tool serializes the whole tool batch.
@@ -297,7 +312,9 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       let message: string;
       let details: MutationDetails | ReadDetails | RecoveryDetails;
       if (params.action === "list") {
-        message = formatTodoPage(state, params.offset ?? 0, params.limit ?? LIST_PAGE_LIMIT);
+        message = params.id === undefined
+          ? formatTodoPage(state, params.offset ?? 0, params.limit ?? LIST_PAGE_LIMIT)
+          : formatTodoDetail(state, params.id);
         details = { version: DETAILS_VERSION, read: "list" };
       } else if (params.action === "batch") {
         if (!params.operations) throw new Error("operations is required for batch");
@@ -310,6 +327,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
           id: params.id,
           text: params.text,
           parentId: params.parentId,
+          link: params.link,
         };
         message = applyTodoMutation(state, operation);
         details = { version: DETAILS_VERSION, operations: [operation] };
@@ -334,7 +352,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("todos", {
-    description: "Show open todos, /todos all for completed history, or /todos toggle|show|hide to control the widget",
+    description: "Show open todos, /todos <id> for details, /todos all for completed history, or /todos toggle|show|hide for the widget",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const command = args.trim();
@@ -344,13 +362,19 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`Todo widget ${widgetVisible ? "shown" : "hidden"}`, "info");
       } else if (!command) {
         ctx.ui.notify(formatTodoPage(state), "info");
+      } else if (/^\d+$/.test(command) && Number.isSafeInteger(Number(command)) && Number(command) > 0) {
+        try {
+          ctx.ui.notify(formatTodoDetail(state, Number(command)), "info");
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+        }
       } else if (command === "all") {
         // The agent pays tokens for every list; a human reading /todos does not.
         const rows = orderedTodos(state, true, LIST_PAGE_LIMIT);
         const more = rows.length < state.items.length ? `\nShowing ${rows.length} of ${state.items.length}` : "";
         ctx.ui.notify(rows.length === 0 ? "No todos" : `${formatTodoCounts(state)}\n${formatRows(rows)}${more}`, "info");
       } else {
-        ctx.ui.notify("Usage: /todos [all|toggle|show|hide]", "warning");
+        ctx.ui.notify("Usage: /todos [id|all|toggle|show|hide]", "warning");
       }
     },
   });
