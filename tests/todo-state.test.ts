@@ -23,6 +23,7 @@ import {
   startTodo,
   todoCounts,
   TODO_TEXT_LIMIT,
+  TODO_LINK_LIMIT,
   type TodoState,
   updateTodo,
 } from "../extensions/todo-state.ts";
@@ -38,7 +39,14 @@ test("nested todo lifecycle", () => {
   startTodo(state, child.id);
   assert.equal(formatTodoPage(state), "TODO: 1 active, 1 pending, 0 completed\n- #1 Ship extension\n  > #2 Run validation");
   pauseTodo(state, child.id);
+  assert.equal(child.status, "paused");
+  assert.equal(formatTodoPage(state), "TODO: 0 active, 1 pending, 1 paused, 0 completed\n- #1 Ship extension\n  ⏸ #2 Run validation");
   assert.equal(completeTodo(state, parent.id), 2);
+  pauseTodo(state, child.id);
+  assert.equal(parent.status, "pending", "pausing a completed child reopens its completed ancestors");
+  startTodo(state, child.id);
+  assert.equal(child.status, "in_progress");
+  completeTodo(state, parent.id);
   assert.equal(formatTodoContext(state), "TODO: 0 active, 0 pending, 2 completed");
   assert.equal(reopenTodo(state, child.id), 1);
   assert.equal(parent.status, "pending");
@@ -132,7 +140,7 @@ test("malformed snapshots and ancestry fail without partial mutations", () => {
     /cycle/,
   );
   assert.throws(
-    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Bad status", status: "paused" as never }] }),
+    () => cloneState({ nextId: 2, items: [{ id: 1, text: "Bad status", status: "blocked" as never }] }),
     /Invalid status/,
   );
   assert.throws(
@@ -176,9 +184,9 @@ test("deep tree operations are iterative", () => {
   assert.ok(deepPage.length < 30_000);
   assert.match(deepPage, /… - #5901 Todo 5901/);
   assert.equal(completeTodo(state, 1), size);
-  assert.deepEqual(todoCounts(state), { pending: 0, inProgress: 0, completed: size });
+  assert.deepEqual(todoCounts(state), { pending: 0, inProgress: 0, paused: 0, completed: size });
   startTodo(state, size);
-  assert.deepEqual(todoCounts(state), { pending: size - 1, inProgress: 1, completed: 0 });
+  assert.deepEqual(todoCounts(state), { pending: size - 1, inProgress: 1, paused: 0, completed: 0 });
 });
 
 test("wide tree operations avoid argument-count limits", () => {
@@ -227,7 +235,8 @@ test("list pages and compaction context stay bounded", () => {
     items: Array.from({ length: 130 }, (_, index) => ({
       id: index + 1,
       text,
-      status: index < 30 ? "in_progress" : "pending",
+      status: index < 30 ? "in_progress" : index < 100 ? "pending" : "paused",
+      link: `https://example.com/evidence/${"x".repeat(1000)}`,
     })),
   };
 
@@ -237,15 +246,17 @@ test("list pages and compaction context stay bounded", () => {
   assert.doesNotMatch(firstPage, /- #101 /);
   const lastPage = formatTodoPage(state, 100, 30);
   assert.match(lastPage, /Showing 101-130 of 130 open/);
-  assert.match(lastPage, /- #130 /);
+  assert.match(lastPage, /⏸ #130 /);
   assert.match(formatTodoPage(state, Number.NaN, Number.NaN), /Showing 1-100 of 130 open/);
   assert.match(formatTodoPage(state, 200), /No open todos at offset 200; 130 open/);
 
   const context = formatTodoContext(state);
-  assert.ok(context.length < 10_000);
-  assert.match(context, /5 active and 75 pending not shown; use todo_list list to page through the open items/);
-  assert.doesNotMatch(context, /> #26 /);
-  assert.doesNotMatch(context, /- #56 /);
+  assert.ok(context.length < 3_000);
+  assert.match(context, /25 active and 65 pending and 25 paused not shown; use todo_list list to page through the open items/);
+  assert.match(context, /⏸ #101 /);
+  assert.match(context, /\[details\]/);
+  assert.match(context, /list with id for detail links/);
+  assert.doesNotMatch(context, /https:|> #6 |- #36 |⏸ #106 /);
 });
 
 function createExtensionHarness(sessionManager?: SessionManager) {
@@ -365,6 +376,93 @@ function createExtensionHarness(sessionManager?: SessionManager) {
   };
 }
 
+test("detail links stay out of titles and are retrieved on demand", async () => {
+  const harness = createExtensionHarness();
+  const link = "https://example.com/pull/123#evidence";
+  await harness.execute({ action: "add", text: "Verify release", link });
+  await harness.execute({ action: "pause", id: 1 });
+  await harness.runCommand("show");
+  assert.equal(harness.widgetUpdates.at(-1)?.join("\n"), "⏸ #1 Verify release [details]");
+  assert.equal(harness.statusUpdates.at(-1), "todo 0 active · 0 pending · 1 paused");
+  assert.equal((await harness.execute({ action: "list" }))?.content[0]?.text,
+    "TODO: 0 active, 0 pending, 1 paused, 0 completed\n⏸ #1 Verify release [details]");
+  const detail = `#1 Verify release\nStatus: paused\nDetails: ${link}`;
+  assert.equal((await harness.execute({ action: "list", id: 1 }))?.content[0]?.text, detail);
+  await harness.runCommand("1");
+  assert.equal(harness.notifications.at(-1), detail);
+  await harness.runCommand("999");
+  assert.equal(harness.notifications.at(-1), "Todo #999 not found");
+
+  await harness.execute({ action: "update", id: 1, text: "Ship release" });
+  assert.equal((await harness.execute({ action: "list", id: 1 }))?.content[0]?.text,
+    `#1 Ship release\nStatus: paused\nDetails: ${link}`);
+  await harness.execute({ action: "update", id: 1, link: "/repo/notes/current.md" });
+  const beforeFailure = (await harness.execute({ action: "list", id: 1 }))?.content;
+  await assert.rejects(harness.execute({ action: "update", id: 1, text: "Must not change", link: " " }), /link cannot be empty/);
+  await assert.rejects(harness.execute({ action: "batch", operations: [
+    { action: "update", id: 1, link: "/wrong.md" }, { action: "remove", id: 999 },
+  ] }), /No changes applied/);
+  assert.deepEqual((await harness.execute({ action: "list", id: 1 }))?.content, beforeFailure);
+  await assert.rejects(harness.execute({ action: "update", id: 1 }), /text or link is required/);
+  await harness.execute({ action: "update", id: 1, link: null });
+  assert.equal((await harness.execute({ action: "list", id: 1 }))?.content[0]?.text, "#1 Ship release\nStatus: paused");
+  await harness.execute({ action: "batch", operations: [
+    { action: "update", id: 1, link }, { action: "complete", id: 1 },
+  ] });
+  assert.equal((await harness.execute({ action: "list", id: 1 }))?.content[0]?.text,
+    `#1 Ship release\nStatus: completed\nDetails: ${link}`);
+  assert.match((await harness.execute({ action: "clear_completed" }))?.content[0]?.text ?? "",
+    /x #1: Ship release\n  Details: https:\/\/example.com\/pull\/123#evidence/);
+});
+
+test("links are bounded and terminal-safe at the tool and restore boundaries", async () => {
+  const harness = createExtensionHarness();
+  await assert.rejects(harness.execute({ action: "add", text: "Not added", link: "x".repeat(TODO_LINK_LIMIT + 1) }), /link cannot exceed 2048/);
+  await assert.rejects(harness.execute({ action: "add", text: "Not added", link: 123 }), /link must be a URL or note\/file path/);
+  const added = await harness.execute({ action: "add", text: "Read evidence", link: "\u001b\u202e/report.md\n" });
+  assert.match(added?.content[0]?.text ?? "", /Added #1:/);
+  assert.equal((await harness.execute({ action: "list", id: 1 }))?.content[0]?.text,
+    "#1 Read evidence\nStatus: pending\nDetails: /report.md");
+  const snapshot = { nextId: 2, items: [{ id: 1, text: "Evidence", status: "paused" as const, link: "/report.md" }] };
+  assert.deepEqual(cloneState(snapshot), snapshot);
+  assert.throws(() => cloneState({ ...snapshot, items: [{ ...snapshot.items[0]!, link: "x".repeat(TODO_LINK_LIMIT + 1) }] }), /link cannot exceed 2048/);
+});
+
+test("paused state and detail links survive native replay and recovery without changing old pause semantics", async () => {
+  const manager = SessionManager.inMemory();
+  manager.appendMessage({ role: "toolResult", toolCallId: "checkpoint", toolName: "todo_list", content: [], isError: false, timestamp: 1,
+    details: { version: 4, state: { nextId: 2, items: [{ id: 1, text: "Legacy pause", status: "pending" }] } } });
+  manager.appendMessage({ role: "toolResult", toolCallId: "old", toolName: "todo_list", content: [], isError: false, timestamp: 2,
+    details: { version: 3, operations: [
+      { action: "start", id: 1 }, { action: "pause", id: 1 },
+    ] } });
+  const harness = createExtensionHarness(manager);
+  harness.emit("session_start", {});
+  await harness.execute({ action: "batch", operations: [
+    { action: "add", text: "Current pause", parentId: 1, link: "/repo/current.md" },
+    { action: "start", id: 2 }, { action: "pause", id: 2 },
+  ] });
+  const branch = JSON.parse(JSON.stringify(manager.getBranch()));
+  const resumed = createExtensionHarness();
+  resumed.startSession(branch);
+  assert.equal((await resumed.execute({ action: "list", id: 1 }))?.content[0]?.text, "#1 Legacy pause\nStatus: pending");
+  const detail = "#2 Current pause\nStatus: paused\nParent: #1\nDetails: /repo/current.md";
+  assert.equal((await resumed.execute({ action: "list", id: 2 }))?.content[0]?.text, detail);
+  resumed.startContextWindow("paused-window");
+  const context = resumed.emit("context", { messages: [contextWindowMarker("paused-window")] });
+  assert.match(context.messages[1].content, /⏸ #2 Current pause \[details\] \(under #1\)/);
+  assert.doesNotMatch(context.messages[1].content, /\/repo\/current.md/);
+
+  resumed.switchBranch([...branch, { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 99 } } }]);
+  const checkpoint = await resumed.execute({ action: "list" });
+  assert.equal((checkpoint?.details as { version: number }).version, 6);
+  resumed.startSession(resumed.branch());
+  assert.equal((await resumed.execute({ action: "list", id: 2 }))?.content[0]?.text, detail);
+  assert.equal((await resumed.execute({ action: "list", id: 1 }))?.content[0]?.text, "#1 Legacy pause\nStatus: pending");
+  await resumed.execute({ action: "start", id: 2 });
+  assert.match((await resumed.execute({ action: "list", id: 2 }))?.content[0]?.text ?? "", /Status: in progress/);
+});
+
 test("clear_completed receipts identify nested items and surviving parents in standalone and batch results", async () => {
   for (const batch of [false, true]) {
     const manager = SessionManager.inMemory();
@@ -392,7 +490,7 @@ test("clear_completed receipts identify nested items and surviving parents in st
       "x #5: Completed root (under #99)",
       "TODO: 0 active, 1 pending, 0 completed",
     ].join("\n"));
-    assert.deepEqual(JSON.parse(JSON.stringify(result?.details)), { version: 3, operations: [{ action: "clear_completed" }] });
+    assert.deepEqual(JSON.parse(JSON.stringify(result?.details)), { version: 5, operations: [{ action: "clear_completed" }] });
     const modelMessage = manager.buildSessionContext().messages.at(-1);
     assert.equal(modelMessage?.role, "toolResult");
     assert.deepEqual(modelMessage?.content, result?.content);
@@ -460,7 +558,7 @@ test("clear_completed batch receipts follow mutations and preserve rollback, IDs
       "- Removed 0 completed item(s)",
       "TODO: 0 active, 1 pending, 0 completed",
     ].join("\n"));
-    assert.deepEqual(result?.details, { version: 3, operations });
+    assert.deepEqual(result?.details, { version: 5, operations });
     const afterCleanup = manager.getLeafId()!;
     const sessionFile = manager.getSessionFile()!;
     const beforeFailure = readFileSync(sessionFile, "utf8");
@@ -522,7 +620,7 @@ test("native context injection has no initial-window or never-used-list tax", as
   assert.deepEqual(result.messages.slice(1), [{
     role: "custom",
     customType: "todo-list-context",
-    content: "[TODO LIST - state after compaction]\nNo todos\nKeep this list current with todo_list.",
+    content: "[TODO LIST - recovery snapshot]\nNo todos\nLater todo_list results supersede this snapshot.",
     display: false,
     timestamp: 1,
   }]);
@@ -542,7 +640,7 @@ test("native context injects the boundary-time todo snapshot immediately after i
     {
       role: "custom",
       customType: "todo-list-context",
-      content: "[TODO LIST - state after compaction]\nTODO: 0 active, 1 pending, 0 completed\n- #1 Before boundary\nKeep this list current with todo_list.",
+      content: "[TODO LIST - recovery snapshot]\nTODO: 0 active, 1 pending, 0 completed\n- #1 Before boundary\nLater todo_list results supersede this snapshot.",
       display: false,
       timestamp: 1,
     },
@@ -625,7 +723,7 @@ test("UI updates and commands honor availability", async () => {
   assert.equal(interactive.widgetUpdates.at(-1), undefined);
   assert.equal(interactive.notifications.at(-1), "Todo widget hidden");
   await interactive.runCommand("gibberish");
-  assert.equal(interactive.notifications.at(-1), "Usage: /todos [all|toggle|show|hide]");
+  assert.equal(interactive.notifications.at(-1), "Usage: /todos [id|all|toggle|show|hide]");
 
   const nested = createExtensionHarness();
   await nested.runCommand("show");
@@ -721,12 +819,12 @@ test("compact mutation logs restore branches and skip malformed snapshots", asyn
     content: Array<{ text: string }>;
     details?: { version: number; operations?: unknown[]; state?: unknown };
   };
-  assert.equal(added.details?.version, 3);
+  assert.equal(added.details?.version, 5);
   assert.equal(added.details?.operations?.length, 1);
   assert.equal(added.details?.state, undefined);
 
   const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }>; details?: unknown };
-  assert.deepEqual(listed.details, { version: 3, read: "list" });
+  assert.deepEqual(listed.details, { version: 5, read: "list" });
   assert.match(listed.content[0]!.text, /#1 Persist me/);
   const savedBranch = harness.branch();
 
@@ -812,7 +910,7 @@ test("restore rolls back a partially corrupt batch", async () => {
   };
   assert.match(added.content[0]!.text, /Warning: Todo history was corrupt/);
   assert.match(added.content[0]!.text, /Added #3: Recovered/);
-  assert.equal(added.details.version, 4);
+  assert.equal(added.details.version, 6);
   assert.deepEqual(added.details.state?.items.map((item) => item.text), ["Checkpoint", "Before corrupt batch", "Recovered"]);
 
   const healedBranch = harness.branch();
@@ -910,7 +1008,7 @@ test("ordinary compaction injects live state only on its active branch", async (
   const result = (await harness.emit("before_agent_start", {})) as { message?: { content?: string } } | undefined;
   assert.equal(
     result?.message?.content,
-    "[TODO LIST - state after compaction]\nTODO: 0 active, 0 pending, 1 completed\nKeep this list current with todo_list.",
+    "[TODO LIST - recovery snapshot]\nTODO: 0 active, 0 pending, 1 completed\nLater todo_list results supersede this snapshot.",
   );
   assert.equal(await harness.emit("before_agent_start", {}), undefined);
 });
@@ -922,7 +1020,7 @@ test("compaction refreshes an emptied list", async () => {
   harness.compact(false, "compaction-empty-history");
 
   const result = (await harness.emit("before_agent_start", {})) as { message?: { content?: string } } | undefined;
-  assert.equal(result?.message?.content, "[TODO LIST - state after compaction]\nNo todos\nKeep this list current with todo_list.");
+  assert.equal(result?.message?.content, "[TODO LIST - recovery snapshot]\nNo todos\nLater todo_list results supersede this snapshot.");
 });
 
 test("overflow compaction immediately steers the current todo state", async () => {

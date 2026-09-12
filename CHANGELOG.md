@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Keep paused work distinct from pending work in listings, counts, the widget, and restored sessions.
+- Attach a detail link to a short todo title; retrieve it with `list` plus `id` or `/todos <id>`. Links also survive batches, recovery, and cleanup receipts.
+
+### Changed
+
+- Limit recovery summaries to five titles per open state, keep detail links out of summaries, and clarify that later tool results supersede the snapshot.
+- Guide agents to replace stale status and maintain one concise current note instead of appending history.
+- Use terminal-default colors for the widget and footer so theme changes cannot leave stale colors behind; status symbols remain distinct.
+- Write version 5 mutation/read entries and version 6 recovery checkpoints. Existing histories remain readable, including the original pending meaning of old pause operations; older extension releases cannot read new entries.
+
 ## [0.6.1] - 2026-09-05
 
 ### Fixed
