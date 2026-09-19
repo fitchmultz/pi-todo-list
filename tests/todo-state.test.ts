@@ -910,8 +910,17 @@ test("restore rolls back a partially corrupt batch", async () => {
   };
   assert.match(added.content[0]!.text, /Warning: Todo history was corrupt/);
   assert.match(added.content[0]!.text, /Added #3: Recovered/);
-  assert.equal(added.details.version, 6);
-  assert.deepEqual(added.details.state?.items.map((item) => item.text), ["Checkpoint", "Before corrupt batch", "Recovered"]);
+  assert.deepEqual(added.details, {
+    version: 6,
+    state: {
+      nextId: 4,
+      items: [
+        { id: 1, text: "Checkpoint", status: "pending" },
+        { id: 2, text: "Before corrupt batch", status: "pending" },
+        { id: 3, text: "Recovered", status: "pending" },
+      ],
+    },
+  });
 
   const healedBranch = harness.branch();
   harness.switchBranch(healedBranch);
