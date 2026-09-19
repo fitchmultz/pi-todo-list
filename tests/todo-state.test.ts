@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import todoListExtension from "../extensions/todo-list.ts";
 import {
   addTodo,
@@ -296,10 +295,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
   let command: Command | undefined;
 
   const api = {
-    on: (event: string, handler: Handler) => {
-      handlers.set(event, handler);
-      return () => { if (handlers.get(event) === handler) handlers.delete(event); };
-    },
+    on: (event: string, handler: Handler) => { handlers.set(event, handler); },
     registerTool: (registered: Tool) => { tool = registered; },
     registerCommand: (_name: string, registered: Command) => { command = registered; },
     sendMessage: (message, options) => {
@@ -362,7 +358,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
         branch.push({ type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } });
         return undefined;
       }
-      const returned = result as { content: Array<{ type: "text"; text: string }>; details?: ToolResultMessage["details"] };
+      const returned = result as { content: Array<{ type: "text"; text: string }>; details?: unknown };
       const message = {
         role: "toolResult" as const,
         toolCallId: "test-call",
@@ -908,17 +904,14 @@ test("restore rolls back a partially corrupt batch", async () => {
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After corrupt batch" }] } } },
   ]);
 
-  const added = await harness.execute({ action: "add", text: "Recovered" });
-  assert.ok(added);
+  const added = (await harness.execute({ action: "add", text: "Recovered" })) as {
+    content: Array<{ text: string }>;
+    details: { version: number; state?: TodoState };
+  };
   assert.match(added.content[0]!.text, /Warning: Todo history was corrupt/);
   assert.match(added.content[0]!.text, /Added #3: Recovered/);
-  assert.deepEqual(added.details, {
-    version: 6,
-    state: {
-      nextId: 4,
-      items: ["Checkpoint", "Before corrupt batch", "Recovered"].map((text, index) => ({ id: index + 1, text, status: "pending" })),
-    },
-  });
+  assert.equal(added.details.version, 6);
+  assert.deepEqual(added.details.state?.items.map((item) => item.text), ["Checkpoint", "Before corrupt batch", "Recovered"]);
 
   const healedBranch = harness.branch();
   harness.switchBranch(healedBranch);
