@@ -956,7 +956,7 @@ test("add-only batch-log restore avoids per-log state clones", async (t) => {
     harness.switchBranch(makeBranch(size));
     return harness;
   };
-  const measure = (harness: ReturnType<typeof createExtensionHarness>) => {
+  const measure = (harness: ReturnType<typeof createExtensionHarness>, windowMs = 250) => {
     const started = performance.now();
     let runs = 0;
     let elapsed: number;
@@ -964,16 +964,17 @@ test("add-only batch-log restore avoids per-log state clones", async (t) => {
       harness.emit("session_tree", {});
       runs += 1;
       elapsed = performance.now() - started;
-    } while (elapsed < 25);
+    } while (elapsed < windowMs);
     return elapsed / runs;
   };
   const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
   const smallHarness = prepare(1_000);
   const largeHarness = prepare(4_000);
-  // Single millisecond-scale restores are dominated by JIT/GC/scheduling noise.
-  // Warm both sizes, then interleave time-amortized samples in alternating order.
-  measure(smallHarness);
-  measure(largeHarness);
+  // Individual restores can take less than a millisecond. Give both sizes time
+  // to warm up, then amortize JIT/GC/scheduling noise over longer windows; a
+  // 25ms window still drifted substantially across samples on hosted runners.
+  measure(smallHarness, 500);
+  measure(largeHarness, 500);
   const samples = [[], []] as [number[], number[]];
   const harnesses = [smallHarness, largeHarness];
   for (let sample = 0; sample < 5; sample += 1) {
@@ -983,17 +984,20 @@ test("add-only batch-log restore avoids per-log state clones", async (t) => {
   }
   const small = median(samples[0]);
   const large = median(samples[1]);
-  t.diagnostic(`Restore ms/run (1000, 4000 todos): ${JSON.stringify(samples)}`);
+  t.diagnostic(`Restore ms/run (1000, 4000 todos; >=250ms/sample): ${JSON.stringify(samples)}`);
 
   // Four times the items permits 6x work, but not per-log cloning's ~16x.
   assert.ok(large < small * 6, `Expected add-only restore to scale near-linearly, got ${small.toFixed(2)}ms -> ${large.toFixed(2)}ms`);
   for (const [harness, size] of [[smallHarness, 1_000], [largeHarness, 4_000]] as const) {
-    const restored = await harness.execute({ action: "list", offset: size - 100 });
-    assert.equal(restored?.content[0]?.text, [
-      `TODO: 0 active, ${size} pending, 0 completed`,
-      ...Array.from({ length: 100 }, (_, index) => `- #${size - 99 + index} Todo ${size - 99 + index}`),
-      `Showing ${size - 99}-${size} of ${size} open`,
-    ].join("\n"));
+    // Check every restored item outside the timer, independently of replay logic.
+    for (let offset = 0; offset < size; offset += 100) {
+      const restored = await harness.execute({ action: "list", offset });
+      assert.equal(restored?.content[0]?.text, [
+        `TODO: 0 active, ${size} pending, 0 completed`,
+        ...Array.from({ length: 100 }, (_, index) => `- #${offset + index + 1} Todo ${offset + index + 1}`),
+        `Showing ${offset + 1}-${offset + 100} of ${size} open`,
+      ].join("\n"));
+    }
   }
 });
 
