@@ -63,7 +63,16 @@ Do not open sessions written by this version with an older extension: older rele
 ## Development
 
 ```bash
-npm ci
-npm run check
+npm ci --ignore-scripts
+npm run check:compat
 pi -e ./extensions/todo-list.ts --list-models
 ```
+
+The development cohort is official Pi 0.86.1. `check:compat` runs the existing state
+suite, native SDK lifecycle tests, typechecking, and a pack dry-run against the
+installed host. Native tests script only model output: Pi loads the extension,
+executes and journals tools, navigates branches, resumes, and compacts. An optional
+native-window test checks the maintained fork's transient recovery snapshot; it
+skips on official hosts without windows and is required with `PI_COMPAT_HOST=fork`.
+Use a disposable HOME/agent directory and no provider credentials. The declared
+Pi 0.84.1 floor and Git tag above are unchanged by this source qualification.

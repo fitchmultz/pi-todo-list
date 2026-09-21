@@ -34,7 +34,8 @@
   "scripts": {
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm test && npm run typecheck && npm pack --dry-run"
+    "check": "npm test && npm run typecheck && npm pack --dry-run",
+    "check:compat": "npm run check"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -53,8 +54,8 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.84.1",
-    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-ai": "0.86.1",
+    "@earendil-works/pi-coding-agent": "0.86.1",
     "@types/node": "22.19.0",
     "typebox": "1.3.7",
     "typescript": "^5.9.3"
