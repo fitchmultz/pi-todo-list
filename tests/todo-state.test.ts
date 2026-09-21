@@ -939,7 +939,7 @@ test("restore rolls back a partially corrupt batch", async () => {
   assert.match(durable.content[0]!.text, /#4 After healing/);
 });
 
-test("add-only batch-log restore avoids per-log state clones", async () => {
+test("add-only batch-log restore avoids per-log state clones", async (t) => {
   const makeBranch = (size: number) => Array.from({ length: size / 2 }, (_, index) => ({
     type: "message",
     message: {
@@ -948,23 +948,53 @@ test("add-only batch-log restore avoids per-log state clones", async () => {
       details: { version: 3, operations: [{ action: "add", text: `Todo ${index * 2 + 1}` }, { action: "add", text: `Todo ${index * 2 + 2}` }] },
     },
   }));
-  const measure = (branch: Array<Record<string, unknown>>) => {
+  const prepare = (size: number) => {
     const harness = createExtensionHarness();
     harness.setHasUI(false);
+    // Copy the fixture once, outside measurement. session_tree still runs the
+    // production restore from scratch, not the tool's incremental mutation path.
+    harness.switchBranch(makeBranch(size));
+    return harness;
+  };
+  const measure = (harness: ReturnType<typeof createExtensionHarness>) => {
     const started = performance.now();
-    harness.switchBranch(branch);
-    return { duration: performance.now() - started, harness };
+    let runs = 0;
+    let elapsed: number;
+    do {
+      harness.emit("session_tree", {});
+      runs += 1;
+      elapsed = performance.now() - started;
+    } while (elapsed < 25);
+    return elapsed / runs;
   };
   const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
-  const smallBranch = makeBranch(1_000);
-  const largeBranch = makeBranch(4_000);
-  const small = median(Array.from({ length: 3 }, () => measure(smallBranch).duration));
-  const largeRuns = Array.from({ length: 3 }, () => measure(largeBranch));
-  const large = median(largeRuns.map((run) => run.duration));
+  const smallHarness = prepare(1_000);
+  const largeHarness = prepare(4_000);
+  // Single millisecond-scale restores are dominated by JIT/GC/scheduling noise.
+  // Warm both sizes, then interleave time-amortized samples in alternating order.
+  measure(smallHarness);
+  measure(largeHarness);
+  const samples = [[], []] as [number[], number[]];
+  const harnesses = [smallHarness, largeHarness];
+  for (let sample = 0; sample < 5; sample += 1) {
+    for (const index of sample % 2 === 0 ? [0, 1] : [1, 0]) {
+      samples[index]!.push(measure(harnesses[index]!));
+    }
+  }
+  const small = median(samples[0]);
+  const large = median(samples[1]);
+  t.diagnostic(`Restore ms/run (1000, 4000 todos): ${JSON.stringify(samples)}`);
 
+  // Four times the items permits 6x work, but not per-log cloning's ~16x.
   assert.ok(large < small * 6, `Expected add-only restore to scale near-linearly, got ${small.toFixed(2)}ms -> ${large.toFixed(2)}ms`);
-  const restored = (await largeRuns[0]!.harness.execute({ action: "list", offset: 3_900 })) as { content: Array<{ text: string }> };
-  assert.match(restored.content[0]!.text, /#4000 Todo 4000/);
+  for (const [harness, size] of [[smallHarness, 1_000], [largeHarness, 4_000]] as const) {
+    const restored = await harness.execute({ action: "list", offset: size - 100 });
+    assert.equal(restored?.content[0]?.text, [
+      `TODO: 0 active, ${size} pending, 0 completed`,
+      ...Array.from({ length: 100 }, (_, index) => `- #${size - 99 + index} Todo ${size - 99 + index}`),
+      `Showing ${size - 99}-${size} of ${size} open`,
+    ].join("\n"));
+  }
 });
 
 test("compaction context stays bounded without duplicating state", async () => {
