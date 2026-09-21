@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import todoListExtension from "../extensions/todo-list.ts";
 import {
   addTodo,
@@ -295,7 +296,10 @@ function createExtensionHarness(sessionManager?: SessionManager) {
   let command: Command | undefined;
 
   const api = {
-    on: (event: string, handler: Handler) => { handlers.set(event, handler); },
+    on: (event: string, handler: Handler) => {
+      handlers.set(event, handler);
+      return () => { if (handlers.get(event) === handler) handlers.delete(event); };
+    },
     registerTool: (registered: Tool) => { tool = registered; },
     registerCommand: (_name: string, registered: Command) => { command = registered; },
     sendMessage: (message, options) => {
@@ -358,7 +362,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
         branch.push({ type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } });
         return undefined;
       }
-      const returned = result as { content: Array<{ type: "text"; text: string }>; details?: unknown };
+      const returned = result as { content: Array<{ type: "text"; text: string }>; details?: ToolResultMessage["details"] };
       const message = {
         role: "toolResult" as const,
         toolCallId: "test-call",
@@ -904,10 +908,8 @@ test("restore rolls back a partially corrupt batch", async () => {
     { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After corrupt batch" }] } } },
   ]);
 
-  const added = (await harness.execute({ action: "add", text: "Recovered" })) as {
-    content: Array<{ text: string }>;
-    details: { version: number; state?: TodoState };
-  };
+  const added = await harness.execute({ action: "add", text: "Recovered" });
+  assert.ok(added);
   assert.match(added.content[0]!.text, /Warning: Todo history was corrupt/);
   assert.match(added.content[0]!.text, /Added #3: Recovered/);
   assert.deepEqual(added.details, {
@@ -937,7 +939,7 @@ test("restore rolls back a partially corrupt batch", async () => {
   assert.match(durable.content[0]!.text, /#4 After healing/);
 });
 
-test("add-only batch-log restore avoids per-log state clones", async () => {
+test("add-only batch-log restore avoids per-log state clones", async (t) => {
   const makeBranch = (size: number) => Array.from({ length: size / 2 }, (_, index) => ({
     type: "message",
     message: {
@@ -946,23 +948,57 @@ test("add-only batch-log restore avoids per-log state clones", async () => {
       details: { version: 3, operations: [{ action: "add", text: `Todo ${index * 2 + 1}` }, { action: "add", text: `Todo ${index * 2 + 2}` }] },
     },
   }));
-  const measure = (branch: Array<Record<string, unknown>>) => {
+  const prepare = (size: number) => {
     const harness = createExtensionHarness();
     harness.setHasUI(false);
+    // Copy the fixture once, outside measurement. session_tree still runs the
+    // production restore from scratch, not the tool's incremental mutation path.
+    harness.switchBranch(makeBranch(size));
+    return harness;
+  };
+  const measure = (harness: ReturnType<typeof createExtensionHarness>, windowMs = 250) => {
     const started = performance.now();
-    harness.switchBranch(branch);
-    return { duration: performance.now() - started, harness };
+    let runs = 0;
+    let elapsed: number;
+    do {
+      harness.emit("session_tree", {});
+      runs += 1;
+      elapsed = performance.now() - started;
+    } while (elapsed < windowMs);
+    return elapsed / runs;
   };
   const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
-  const smallBranch = makeBranch(1_000);
-  const largeBranch = makeBranch(4_000);
-  const small = median(Array.from({ length: 3 }, () => measure(smallBranch).duration));
-  const largeRuns = Array.from({ length: 3 }, () => measure(largeBranch));
-  const large = median(largeRuns.map((run) => run.duration));
+  const smallHarness = prepare(1_000);
+  const largeHarness = prepare(4_000);
+  // Individual restores can take less than a millisecond. Give both sizes time
+  // to warm up, then amortize JIT/GC/scheduling noise over longer windows; a
+  // 25ms window still drifted substantially across samples on hosted runners.
+  measure(smallHarness, 500);
+  measure(largeHarness, 500);
+  const samples = [[], []] as [number[], number[]];
+  const harnesses = [smallHarness, largeHarness];
+  for (let sample = 0; sample < 5; sample += 1) {
+    for (const index of sample % 2 === 0 ? [0, 1] : [1, 0]) {
+      samples[index]!.push(measure(harnesses[index]!));
+    }
+  }
+  const small = median(samples[0]);
+  const large = median(samples[1]);
+  t.diagnostic(`Restore ms/run (1000, 4000 todos; >=250ms/sample): ${JSON.stringify(samples)}`);
 
+  // Four times the items permits 6x work, but not per-log cloning's ~16x.
   assert.ok(large < small * 6, `Expected add-only restore to scale near-linearly, got ${small.toFixed(2)}ms -> ${large.toFixed(2)}ms`);
-  const restored = (await largeRuns[0]!.harness.execute({ action: "list", offset: 3_900 })) as { content: Array<{ text: string }> };
-  assert.match(restored.content[0]!.text, /#4000 Todo 4000/);
+  for (const [harness, size] of [[smallHarness, 1_000], [largeHarness, 4_000]] as const) {
+    // Check every restored item outside the timer, independently of replay logic.
+    for (let offset = 0; offset < size; offset += 100) {
+      const restored = await harness.execute({ action: "list", offset });
+      assert.equal(restored?.content[0]?.text, [
+        `TODO: 0 active, ${size} pending, 0 completed`,
+        ...Array.from({ length: 100 }, (_, index) => `- #${offset + index + 1} Todo ${offset + index + 1}`),
+        `Showing ${offset + 1}-${offset + 100} of ${size} open`,
+      ].join("\n"));
+    }
+  }
 });
 
 test("compaction context stays bounded without duplicating state", async () => {
