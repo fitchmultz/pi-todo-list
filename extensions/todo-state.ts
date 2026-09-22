@@ -31,9 +31,29 @@ export interface TodoMutation {
   text?: string;
   parentId?: number;
   link?: string | null;
+  status?: TodoStatus;
 }
 
-const TODO_STATUSES: readonly TodoStatus[] = ["pending", "in_progress", "paused", "completed"];
+export interface TodoBatchMutation extends Omit<TodoMutation, "id" | "parentId"> {
+  id?: number | string;
+  parentId?: number | string;
+  ref?: string;
+}
+
+export const TODO_STATUSES = ["pending", "in_progress", "paused", "completed"] as const;
+export const TODO_REF_LIMIT = 64;
+export const BATCH_OPERATION_LIMIT = 100;
+const MUTATION_FIELDS: Record<TodoMutationAction, readonly string[]> = {
+  add: ["text", "parentId", "link", "status"],
+  update: ["id", "text", "link"],
+  move: ["id", "parentId"],
+  start: ["id"],
+  pause: ["id"],
+  complete: ["id"],
+  reopen: ["id"],
+  remove: ["id"],
+  clear_completed: [],
+};
 const CONTROL_CHARACTERS = /(?:[\u0000-\u001f\u007f-\u009f]|\p{Bidi_Control})+/gu;
 const CONTEXT_ITEMS_PER_STATUS = 5;
 const CONTEXT_TEXT_LENGTH = 160;
@@ -164,12 +184,13 @@ function reopenCompleted(ancestors: TodoItem[]): void {
   for (const ancestor of ancestors) if (ancestor.status === "completed") ancestor.status = "pending";
 }
 
-export function addTodo(state: TodoState, text: string, parentId?: number, link?: string | null): TodoItem {
+export function addTodo(state: TodoState, text: string, parentId?: number, link?: string | null, status: TodoStatus = "pending"): TodoItem {
+  if (!TODO_STATUSES.includes(status)) throw new Error("Invalid todo status");
   const value = concise(text);
   const detailLink = normalizeLink(link);
   if (parentId !== undefined && item(state, parentId).status === "completed") throw new Error("Cannot add under a completed todo");
   if (!Number.isSafeInteger(state.nextId) || state.nextId < 1 || state.nextId >= Number.MAX_SAFE_INTEGER) throw new Error("Todo id limit reached");
-  const added = { id: state.nextId++, text: value, status: "pending" as const, ...(parentId === undefined ? {} : { parentId }), ...(detailLink === undefined ? {} : { link: detailLink }) };
+  const added = { id: state.nextId++, text: value, status, ...(parentId === undefined ? {} : { parentId }), ...(detailLink === undefined ? {} : { link: detailLink }) };
   state.items.push(added);
   return added;
 }
@@ -241,6 +262,54 @@ export function clearCompleted(state: TodoState): number {
   return before - state.items.length;
 }
 
+function validateRef(ref: unknown): asserts ref is string {
+  if (typeof ref !== "string" || concise(ref, TODO_REF_LIMIT, "ref") !== ref) {
+    throw new Error("ref must be a nonempty label without padding or control characters");
+  }
+}
+
+export function normalizeTodoMutation(value: unknown, refs?: ReadonlyMap<string, number>): TodoMutation {
+  if (!value || typeof value !== "object") throw new Error("Invalid todo operation");
+  const input = value as Record<string, unknown>;
+  const action = input.action as TodoMutationAction;
+  if (!TODO_MUTATIONS.includes(action)) throw new Error(`Unknown todo action: ${String(action)}`);
+  const fields = MUTATION_FIELDS[action];
+  for (const key of Object.keys(input)) {
+    if (input[key] === undefined || key === "action" || fields.includes(key)) continue;
+    if (key === "ref" && action === "add" && refs) {
+      validateRef(input.ref);
+      if (refs.has(input.ref)) throw new Error(`Duplicate batch ref: ${input.ref}`);
+      continue;
+    }
+    throw new Error(`${key} is not supported for ${action}${key === "ref" ? " outside a batch add" : ""}`);
+  }
+
+  const operation: TodoMutation = { action };
+  for (const key of ["id", "parentId"] as const) {
+    const id = input[key];
+    if (id === undefined) continue;
+    if (typeof id === "string" && refs) {
+      validateRef(id);
+      const resolved = refs.get(id);
+      if (resolved === undefined) throw new Error(`Unknown or forward batch ref: ${id}`);
+      operation[key] = resolved;
+    } else {
+      if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 1) throw new Error(`${key} must be a positive safe integer${refs ? " or an earlier batch ref" : ""}`);
+      operation[key] = id;
+    }
+  }
+  if (input.text !== undefined) {
+    if (typeof input.text !== "string") throw new Error("Todo text must be a string");
+    operation.text = concise(input.text);
+  }
+  if (input.link !== undefined) operation.link = normalizeLink(input.link as string | null) ?? null;
+  if (input.status !== undefined) {
+    if (!TODO_STATUSES.includes(input.status as TodoStatus)) throw new Error("Invalid todo status");
+    operation.status = input.status as TodoStatus;
+  }
+  return operation;
+}
+
 function requiredId(operation: TodoMutation): number {
   if (operation.id === undefined) throw new Error("id is required for this action");
   return operation.id;
@@ -251,44 +320,48 @@ function requiredText(operation: TodoMutation): string {
   return operation.text;
 }
 
-export function applyTodoMutation(state: TodoState, operation: TodoMutation): string {
+export function applyTodoMutation(state: TodoState, operation: TodoMutation, withReceipt = true): string {
   switch (operation.action) {
     case "add": {
-      const todo = addTodo(state, requiredText(operation), operation.parentId, operation.link);
-      return `Added #${todo.id}: ${todo.text}`;
+      const todo = addTodo(state, requiredText(operation), operation.parentId, operation.link, operation.status);
+      return withReceipt ? `Added #${todo.id}: ${todo.text}` : "";
     }
     case "update": {
       const todo = updateTodo(state, requiredId(operation), operation.text, operation.link);
-      return `Updated #${todo.id}: ${todo.text}`;
+      return withReceipt ? `Updated #${todo.id}: ${todo.text}` : "";
     }
     case "move": {
       const todo = moveTodo(state, requiredId(operation), operation.parentId);
-      return `Moved #${todo.id}${todo.parentId === undefined ? " to top level" : ` under #${todo.parentId}`}`;
+      return withReceipt ? `Moved #${todo.id}${todo.parentId === undefined ? " to top level" : ` under #${todo.parentId}`}` : "";
     }
     case "start": {
       const todo = startTodo(state, requiredId(operation));
-      return `Started #${todo.id}: ${todo.text}`;
+      return withReceipt ? `Started #${todo.id}: ${todo.text}` : "";
     }
     case "pause": {
       const todo = pauseTodo(state, requiredId(operation));
-      return `Paused #${todo.id}: ${todo.text}`;
+      return withReceipt ? `Paused #${todo.id}: ${todo.text}` : "";
     }
     case "complete": {
       const id = requiredId(operation);
       const count = completeTodo(state, id);
-      return `Completed #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}`;
+      return withReceipt ? `Completed #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}` : "";
     }
     case "reopen": {
       const id = requiredId(operation);
       const count = reopenTodo(state, id);
-      return `Reopened #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}`;
+      return withReceipt ? `Reopened #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}` : "";
     }
     case "remove": {
       const id = requiredId(operation);
       const count = removeTodo(state, id);
-      return `Removed #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}`;
+      return withReceipt ? `Removed #${id}${count > 1 ? ` and ${count - 1} nested item(s)` : ""}` : "";
     }
     case "clear_completed": {
+      if (!withReceipt) {
+        clearCompleted(state);
+        return "";
+      }
       const removed = state.items.filter((todo) => todo.status === "completed").sort((a, b) => a.id - b.id);
       const receipt = removed.map((todo) => `x #${todo.id}${todo.parentId === undefined ? "" : ` (under #${todo.parentId})`}: ${todo.text}${todo.link ? `\n  Details: ${todo.link}` : ""}`);
       return [`Removed ${clearCompleted(state)} completed item(s)`, ...receipt].join("\n");
@@ -297,21 +370,29 @@ export function applyTodoMutation(state: TodoState, operation: TodoMutation): st
   throw new Error(`Unknown todo action: ${String((operation as { action?: unknown }).action)}`);
 }
 
-export function applyTodoBatch(state: TodoState, operations: TodoMutation[]): string[] {
-  if (operations.length === 0) throw new Error("operations cannot be empty");
+export function applyTodoBatch(state: TodoState, operations: TodoBatchMutation[]): { messages: string[]; operations: TodoMutation[] } {
+  if (!Array.isArray(operations) || operations.length === 0 || operations.length > BATCH_OPERATION_LIMIT) {
+    throw new Error(`operations must contain 1-${BATCH_OPERATION_LIMIT} mutations`);
+  }
   const draft = cloneState(state);
   const messages: string[] = [];
+  const canonical: TodoMutation[] = [];
+  const refs = new Map<string, number>();
   for (const [index, operation] of operations.entries()) {
     try {
-      messages.push(applyTodoMutation(draft, operation));
+      const normalized = normalizeTodoMutation(operation, refs);
+      const addedId = draft.nextId;
+      messages.push(applyTodoMutation(draft, normalized));
+      canonical.push(normalized);
+      if (operation.ref !== undefined) refs.set(operation.ref, addedId);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`Batch operation ${index + 1} (${String(operation.action)}) failed: ${reason}. No changes applied.`);
+      throw new Error(`Batch operation ${index + 1} (${String(operation?.action)}) failed: ${reason}. No changes applied.`);
     }
   }
   state.items = draft.items;
   state.nextId = draft.nextId;
-  return messages;
+  return { messages, operations: canonical };
 }
 
 export function orderedTodos(

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0] - 2026-09-22
+
+### Added
+
+- Set an initial status when adding a todo, including inside a batch, to start work without a separate call.
+- Give batch additions temporary `ref` labels and use them in later `id` or `parentId` fields. Nested work can be created atomically without guessing generated IDs.
+
+### Fixed
+
+- Restore validated committed mutations even when another extension marks their tool result as an error afterward.
+- Preserve ignored inputs in older mutation logs, including links written before link support, without falsely treating valid history as corrupt.
+
+### Changed
+
+- Write format 7 mutation/read entries with resolved numeric IDs and initial statuses; keep format 6 recovery checkpoints and preserve older history semantics.
+- Replay mutations without formatting discarded receipts; full live cleanup receipts remain unchanged.
+- Qualify the extension against official Pi 0.87.0 and the maintained fork using native lifecycle tests and the shared compatibility workflow.
+
 ## [0.7.0] - 2026-09-12
 
 ### Added

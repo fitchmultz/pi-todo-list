@@ -25,6 +25,8 @@ import {
   todoCounts,
   TODO_TEXT_LIMIT,
   TODO_LINK_LIMIT,
+  TODO_REF_LIMIT,
+  type TodoBatchMutation,
   type TodoState,
   updateTodo,
 } from "../extensions/todo-state.ts";
@@ -76,7 +78,7 @@ test("batch mutations are ordered and atomic", () => {
       { action: "add", text: "Second", parentId: 1 },
       { action: "update", id: 2, text: "Updated second" },
       { action: "start", id: 2 },
-    ]),
+    ]).messages,
     ["Added #1: First", "Added #2: Second", "Updated #2: Updated second", "Started #2: Updated second"],
   );
   assert.equal(formatTodoPage(state), "TODO: 1 active, 1 pending, 0 completed\n- #1 First\n  > #2 Updated second");
@@ -87,6 +89,94 @@ test("batch mutations are ordered and atomic", () => {
     /not found/,
   );
   assert.deepEqual(state, before);
+});
+
+test("batch refs resolve in order without changing cascades or persistent numeric IDs", () => {
+  const state = emptyState();
+  addTodo(state, "Existing");
+  const operations: TodoBatchMutation[] = [
+    { action: "add", text: "Parent", status: "in_progress", ref: "1" },
+    { action: "add", text: "Child", parentId: "1", status: "paused", ref: "child" },
+    { action: "add", text: "Grandchild", parentId: "child", status: "completed", ref: "leaf" },
+    { action: "update", id: 1, text: "Existing numeric ID" },
+    { action: "update", id: "1", text: "String ref" },
+    { action: "complete", id: "1" },
+    { action: "start", id: "leaf" },
+    { action: "pause", id: "child" },
+    { action: "move", id: "leaf", parentId: 1 },
+  ];
+  const before = structuredClone(operations);
+  const result = applyTodoBatch(state, operations);
+  assert.deepEqual(operations, before, "reference resolution does not mutate the caller's inputs");
+  assert.deepEqual(state, { nextId: 5, items: [
+    { id: 1, text: "Existing numeric ID", status: "pending" },
+    { id: 2, text: "String ref", status: "pending" },
+    { id: 3, text: "Child", status: "paused", parentId: 2 },
+    { id: 4, text: "Grandchild", status: "in_progress", parentId: 1 },
+  ] });
+  assert.deepEqual(result.operations, [
+    { action: "add", text: "Parent", status: "in_progress" },
+    { action: "add", text: "Child", parentId: 2, status: "paused" },
+    { action: "add", text: "Grandchild", parentId: 3, status: "completed" },
+    { action: "update", id: 1, text: "Existing numeric ID" },
+    { action: "update", id: 2, text: "String ref" },
+    { action: "complete", id: 2 },
+    { action: "start", id: 4 },
+    { action: "pause", id: 3 },
+    { action: "move", id: 4, parentId: 1 },
+  ]);
+  assert.throws(() => applyTodoBatch(state, [{ action: "remove", id: "child" }]), /Unknown or forward batch ref/);
+  applyTodoBatch(state, [{ action: "reopen", id: 1 }]);
+  assert.equal(state.items[3]!.status, "pending");
+});
+
+test("invalid batch references and statuses roll back items and the ID counter", () => {
+  const failures: TodoBatchMutation[][] = [
+    [{ action: "add", text: "Duplicate", ref: "new" }],
+    [{ action: "start", id: "missing" }],
+    [{ action: "add", text: "Forward child", parentId: "later" }, { action: "add", text: "Later", ref: "later" }],
+    [{ action: "update", id: "new", text: "Bad ref", ref: "rename" }],
+    [{ action: "add", text: "Invalid status", status: "blocked" as never }],
+    [{ action: "start", id: "new", status: "completed" }],
+    [{ action: "remove", id: "new" }, { action: "pause", id: "new" }],
+    [{ action: "add", text: "Self reference", ref: "self", parentId: "self" }],
+    [{ action: "move", id: "new", parentId: "missing" }],
+  ];
+  for (const failure of failures) {
+    const state = emptyState();
+    addTodo(state, "Unchanged");
+    const before = cloneState(state);
+    assert.throws(() => applyTodoBatch(state, [{ action: "add", text: "Rolled back", ref: "new" }, ...failure]), /No changes applied/);
+    assert.deepEqual(state, before);
+    assert.equal(addTodo(state, "Next ID").id, 2);
+  }
+  const state = emptyState();
+  assert.throws(() => applyTodoBatch(state, []), /1-100/);
+  assert.throws(() => applyTodoBatch(state, Array.from({ length: 101 }, () => ({ action: "add", text: "Too many" }))), /1-100/);
+  assert.deepEqual(state, emptyState());
+});
+
+test("batch reference uses reject unsafe labels before lookup and roll back", () => {
+  for (const ref of ["new\nother", "\u001b[31mnew", "\u202enew", " new ", "", "x".repeat(TODO_REF_LIMIT + 1)]) {
+    for (const operation of [
+      { action: "add", text: "Invalid declaration", ref },
+      { action: "start", id: ref },
+      { action: "add", text: "Invalid parent ref", parentId: ref },
+    ] satisfies TodoBatchMutation[]) {
+      const state = emptyState();
+      addTodo(state, "Existing");
+      const before = cloneState(state);
+      assert.throws(() => applyTodoBatch(state, [{ action: "add", text: "Rolled back", ref: "new" }, operation]), (error) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /ref (?:must|cannot)/);
+        assert.doesNotMatch(error.message, /[\n\u001b\u202e]/);
+        assert.match(error.message, /No changes applied/);
+        return true;
+      });
+      assert.deepEqual(state, before);
+      assert.equal(addTodo(state, "Next ID").id, 2);
+    }
+  }
 });
 
 test("todo text is bounded and safe to render", () => {
@@ -380,6 +470,74 @@ function createExtensionHarness(sessionManager?: SessionManager) {
   };
 }
 
+test("add accepts every initial status standalone and in batches while defaulting to pending", async () => {
+  for (const batch of [false, true]) {
+    const harness = createExtensionHarness();
+    for (const [index, status] of [undefined, "pending", "in_progress", "paused", "completed"].entries()) {
+      const operation = { action: "add", text: `Initial ${status ?? "default"}`, ...(status === undefined ? {} : { status }) };
+      await harness.execute(batch ? { action: "batch", operations: [operation] } : operation);
+      assert.equal((await harness.execute({ action: "list", id: index + 1 }))?.content[0]?.text,
+        `#${index + 1} Initial ${status ?? "default"}\nStatus: ${(status ?? "pending").replace("_", " ")}`);
+    }
+    await harness.execute({ action: "add", text: "Also active", status: "in_progress" });
+    assert.match((await harness.execute({ action: "list" }))?.content[0]?.text ?? "", /TODO: 2 active, 2 pending, 1 paused, 1 completed/);
+    for (const status of ["pending", "in_progress", "paused", "completed"]) {
+      const operation = { action: "add", text: "Rejected child", parentId: 5, status };
+      await assert.rejects(harness.execute(batch ? { action: "batch", operations: [operation] } : operation), /Cannot add under a completed todo/);
+    }
+    await assert.rejects(harness.execute({ action: "add", text: "Invalid status", status: "blocked" }), /Invalid todo status/);
+    await assert.rejects(harness.execute({ action: "start", id: 1, status: "completed" }), /status is only supported for add/);
+    await assert.rejects(harness.execute({ action: "add", text: "Standalone ref", ref: "outside" }), /ref is only supported/);
+    await assert.rejects(harness.execute({ action: "update", id: "1", text: "String outside batch" }), /positive safe integer/);
+    await harness.execute({ action: "add", text: "Next ID" });
+    assert.match((await harness.execute({ action: "list", id: 7 }))?.content[0]?.text ?? "", /#7 Next ID/);
+  }
+});
+
+test("canonical numeric operations restore nested ref batches and preserve links", async () => {
+  const harness = createExtensionHarness();
+  await harness.execute({ action: "add", text: "Existing" });
+  const result = await harness.execute({ action: "batch", operations: [
+    { action: "add", text: "Parent", ref: "1", status: "in_progress", link: "/parent.md" },
+    { action: "add", text: "Child", ref: "child", parentId: "1", status: "paused" },
+    { action: "update", id: "1", text: "Renamed parent" },
+    { action: "move", id: "child", parentId: 1 },
+  ] });
+  assert.deepEqual(result?.details, { version: 7, operations: [
+    { action: "add", text: "Parent", status: "in_progress", link: "/parent.md" },
+    { action: "add", text: "Child", parentId: 2, status: "paused" },
+    { action: "update", id: 2, text: "Renamed parent" },
+    { action: "move", id: 3, parentId: 1 },
+  ] });
+  const resumed = createExtensionHarness();
+  resumed.startSession(JSON.parse(JSON.stringify(harness.branch())));
+  assert.deepEqual(resumed.notifications, []);
+  assert.equal((await resumed.execute({ action: "list", id: 2 }))?.content[0]?.text,
+    "#2 Renamed parent\nStatus: in progress\nDetails: /parent.md");
+  assert.equal((await resumed.execute({ action: "list", id: 3 }))?.content[0]?.text, "#3 Child\nStatus: paused\nParent: #1");
+  await assert.rejects(resumed.execute({ action: "batch", operations: [{ action: "remove", id: "child" }] }), /Unknown or forward batch ref/);
+});
+
+test("100 additions with initial statuses stay within one restorable journal envelope", async () => {
+  const manager = SessionManager.inMemory();
+  const source = createExtensionHarness(manager);
+  const statuses = ["pending", "in_progress", "paused", "completed"] as const;
+  const operations = Array.from({ length: 100 }, (_, index) => ({
+    action: "add", text: `Task ${index + 1}`, status: statuses[index % statuses.length], ref: `task-${index}`,
+  }));
+  const result = await source.execute({ action: "batch", operations });
+  assert.deepEqual(result?.details, { version: 7, operations: operations.map(({ ref, ...operation }) => operation) });
+  const resumed = createExtensionHarness();
+  resumed.startSession(JSON.parse(JSON.stringify(manager.getBranch())));
+  assert.deepEqual(resumed.notifications, []);
+  assert.match((await resumed.execute({ action: "list" }))?.content[0]?.text ?? "", /TODO: 25 active, 25 pending, 25 paused, 25 completed/);
+  for (const [index, operation] of operations.entries()) {
+    assert.equal((await resumed.execute({ action: "list", id: index + 1 }))?.content[0]?.text,
+      `#${index + 1} ${operation.text}\nStatus: ${operation.status!.replace("_", " ")}`);
+  }
+  assert.match((await resumed.execute({ action: "add", text: "After journal" }))?.content[0]?.text ?? "", /Added #101:/);
+});
+
 test("detail links stay out of titles and are retrieved on demand", async () => {
   const harness = createExtensionHarness();
   const link = "https://example.com/pull/123#evidence";
@@ -467,6 +625,75 @@ test("paused state and detail links survive native replay and recovery without c
   assert.match((await resumed.execute({ action: "list", id: 2 }))?.content[0]?.text ?? "", /Status: in progress/);
 });
 
+test("legacy snapshots and logs ignore historical extra fields and keep target-only pause", async () => {
+  for (const version of [1, 2, 4, 6]) {
+    for (const logVersion of [3, 5]) {
+      const root = version === 1
+        ? { id: 1, text: "Root", done: false }
+        : { id: 1, text: "Root", status: "pending" };
+      const checkpoint = {
+        type: "message", message: { role: "toolResult", toolName: "todo_list", details: {
+          version, ...(version < 3 ? { action: "add" } : {}), state: { nextId: 2, items: [root] },
+        } },
+      };
+      const branch = [checkpoint, { type: "message", message: { role: "toolResult", toolName: "todo_list", details: {
+        version: logVersion, operations: [
+          { action: "add", text: "Child", parentId: 1, status: "completed", ref: "ignored" },
+          { action: "add", text: "Grandchild", parentId: 2, status: "invalid", ref: "ignored" },
+          { action: "update", id: 2, text: "Renamed child", parentId: 999, status: "invalid", ref: "ignored" },
+          { action: "complete", id: 1 },
+          { action: "pause", id: 2 },
+          { action: "add", text: "Still pending", status: "in_progress", ref: "ignored" },
+        ],
+      } } }];
+      const harness = createExtensionHarness();
+      harness.startSession(branch);
+      assert.deepEqual(harness.notifications, [], `snapshot ${version}, log ${logVersion}`);
+      assert.equal((await harness.execute({ action: "list", id: 1 }))?.content[0]?.text, "#1 Root\nStatus: pending");
+      assert.equal((await harness.execute({ action: "list", id: 2 }))?.content[0]?.text,
+        `#2 Renamed child\nStatus: ${logVersion === 3 ? "pending" : "paused"}\nParent: #1`);
+      assert.equal((await harness.execute({ action: "list", id: 3 }))?.content[0]?.text,
+        "#3 Grandchild\nStatus: completed\nParent: #2");
+      assert.equal((await harness.execute({ action: "list", id: 4 }))?.content[0]?.text, "#4 Still pending\nStatus: pending");
+      harness.switchBranch([checkpoint]);
+      assert.match((await harness.execute({ action: "add", text: "Forked from checkpoint", status: "paused" }))?.content[0]?.text ?? "", /Added #2:/);
+      harness.switchBranch(branch);
+      assert.match((await harness.execute({ action: "add", text: "After legacy log", status: "in_progress" }))?.content[0]?.text ?? "", /Added #5:/);
+    }
+  }
+});
+
+test("legacy v3 logs ignore link inputs while v5 and current logs retain links", async () => {
+  const harness = createExtensionHarness();
+  const legacy = { type: "message", message: { role: "toolResult", toolName: "todo_list", details: {
+    version: 3, operations: [
+      { action: "add", text: "Parent", link: "/ignored.md" },
+      { action: "add", text: "Child", parentId: 1, link: 123 },
+      { action: "update", id: 2, text: "Renamed child", parentId: 1, link: { ignored: true } },
+    ],
+  } } };
+  harness.startSession([legacy]);
+  assert.deepEqual(harness.notifications, []);
+  assert.equal((await harness.execute({ action: "list", id: 1 }))?.content[0]?.text, "#1 Parent\nStatus: pending");
+  assert.equal((await harness.execute({ action: "list", id: 2 }))?.content[0]?.text, "#2 Renamed child\nStatus: pending\nParent: #1");
+  harness.switchBranch([legacy, { type: "message", message: { role: "toolResult", toolName: "todo_list", details: {
+    version: 5, operations: [
+      { action: "update", id: 2, link: "/v5-child.md" },
+      { action: "add", text: "Linked", link: "/v5-add.md" },
+      { action: "update", id: 3, text: "Linked rename" },
+    ],
+  } } }]);
+  assert.deepEqual(harness.notifications, []);
+  assert.equal((await harness.execute({ action: "list", id: 2 }))?.content[0]?.text,
+    "#2 Renamed child\nStatus: pending\nParent: #1\nDetails: /v5-child.md");
+  assert.equal((await harness.execute({ action: "list", id: 3 }))?.content[0]?.text,
+    "#3 Linked rename\nStatus: pending\nDetails: /v5-add.md");
+  await harness.execute({ action: "update", id: 3, link: "/current.md" });
+  harness.startSession(harness.branch());
+  assert.equal((await harness.execute({ action: "list", id: 3 }))?.content[0]?.text,
+    "#3 Linked rename\nStatus: pending\nDetails: /current.md");
+});
+
 test("clear_completed receipts identify nested items and surviving parents in standalone and batch results", async () => {
   for (const batch of [false, true]) {
     const manager = SessionManager.inMemory();
@@ -494,7 +721,7 @@ test("clear_completed receipts identify nested items and surviving parents in st
       "x #5: Completed root (under #99)",
       "TODO: 0 active, 1 pending, 0 completed",
     ].join("\n"));
-    assert.deepEqual(JSON.parse(JSON.stringify(result?.details)), { version: 5, operations: [{ action: "clear_completed" }] });
+    assert.deepEqual(JSON.parse(JSON.stringify(result?.details)), { version: 7, operations: [{ action: "clear_completed" }] });
     const modelMessage = manager.buildSessionContext().messages.at(-1);
     assert.equal(modelMessage?.role, "toolResult");
     assert.deepEqual(modelMessage?.content, result?.content);
@@ -562,7 +789,7 @@ test("clear_completed batch receipts follow mutations and preserve rollback, IDs
       "- Removed 0 completed item(s)",
       "TODO: 0 active, 1 pending, 0 completed",
     ].join("\n"));
-    assert.deepEqual(result?.details, { version: 5, operations });
+    assert.deepEqual(result?.details, { version: 7, operations });
     const afterCleanup = manager.getLeafId()!;
     const sessionFile = manager.getSessionFile()!;
     const beforeFailure = readFileSync(sessionFile, "utf8");
@@ -774,6 +1001,51 @@ test("todo_list opts into parallel tool batches and mutates atomically", async (
   );
 });
 
+test("committed mutation details survive a downstream error flag", async () => {
+  const source = createExtensionHarness();
+  await source.execute({ action: "add", text: "Committed before postprocessing" });
+  const branch = source.branch();
+  (branch[0]!.message as Record<string, unknown>).isError = true;
+  branch.push(
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } },
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true, details: {} } },
+  );
+  const resumed = createExtensionHarness();
+  resumed.startSession(branch);
+  assert.equal((await resumed.execute({ action: "list" }))?.content[0]?.text,
+    "TODO: 0 active, 1 pending, 0 completed\n- #1 Committed before postprocessing");
+  assert.match((await resumed.execute({ action: "add", text: "After postprocessing" }))?.content[0]?.text ?? "", /Added #2:/);
+  assert.deepEqual(resumed.notifications, []);
+});
+
+test("error-flagged commits still validate operations and recovery snapshots", async () => {
+  for (const invalid of [
+    { action: "add", text: "Bad status", status: "blocked" },
+    { action: "add", text: "Leaked ref", ref: "temporary" },
+    { action: "update", id: "1", text: "Noncanonical ID" },
+    { action: "update", id: 1, text: "Unexpected parent", parentId: 1 },
+  ]) {
+    const harness = createExtensionHarness();
+    harness.startSession([
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true, details: {
+        version: 6, state: { nextId: 9, items: [{ id: 1, text: "Valid checkpoint", status: "paused" }] },
+      } } },
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true, details: {
+        version: 7, operations: [{ action: "add", text: "Partial must roll back" }, invalid],
+      } } },
+      { type: "message", message: { role: "toolResult", toolName: "todo_list", details: {
+        version: 7, operations: [{ action: "add", text: "Must not cross corruption" }],
+      } } },
+    ]);
+    const result = await harness.execute({ action: "add", text: "Recovered", status: "in_progress" });
+    assert.match(result?.content[0]?.text ?? "", /Warning: Todo history was corrupt[\s\S]*Added #9:/);
+    assert.deepEqual(result?.details, { version: 6, state: { nextId: 10, items: [
+      { id: 1, text: "Valid checkpoint", status: "paused" },
+      { id: 9, text: "Recovered", status: "in_progress" },
+    ] } });
+  }
+});
+
 test("a widget failure cannot discard a persisted mutation", async () => {
   const harness = createExtensionHarness();
   harness.failNextWidgetUpdate();
@@ -823,12 +1095,12 @@ test("compact mutation logs restore branches and skip malformed snapshots", asyn
     content: Array<{ text: string }>;
     details?: { version: number; operations?: unknown[]; state?: unknown };
   };
-  assert.equal(added.details?.version, 5);
+  assert.equal(added.details?.version, 7);
   assert.equal(added.details?.operations?.length, 1);
   assert.equal(added.details?.state, undefined);
 
   const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }>; details?: unknown };
-  assert.deepEqual(listed.details, { version: 5, read: "list" });
+  assert.deepEqual(listed.details, { version: 7, read: "list" });
   assert.match(listed.content[0]!.text, /#1 Persist me/);
   const savedBranch = harness.branch();
 
