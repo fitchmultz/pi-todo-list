@@ -15,6 +15,55 @@ concurrency:
 
 jobs:
   compatibility:
-    uses: fitchmultz/.github/.github/workflows/pi-compatibility.yml@117b227140265329055bcda5927ac170c6301d75 # v1.0.0
-    with:
-      automation-ref: 117b227140265329055bcda5927ac170c6301d75 # v1.0.0
+    name: compatibility / compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: extension
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: fitchmultz/.github
+          ref: 117b227140265329055bcda5927ac170c6301d75 # v1.0.0
+          path: automation
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.19.0'
+          package-manager-cache: false
+      - name: Use the declared npm version
+        working-directory: extension
+        run: npm install --global "$(node -p 'require("./package.json").packageManager')"
+      - name: Check official Pi
+        working-directory: extension
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+      - name: Check installed package on official Pi
+        run: node extension/scripts/ci-compat.mjs official extension automation
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: fitchmultz/pi
+          ref: 870f4f667bb0135f2d9d935c087dc45b6e48ff74
+          path: fork
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Use the reviewed fork-build npm version
+        working-directory: automation
+        run: npm install --global "$(node -p 'require("./package.json").packageManager')"
+      - name: Build the exact fork packages
+        working-directory: fork
+        run: |
+          npm ci --ignore-scripts
+          npm run hydrate:model-data
+          git diff --exit-code
+          PI_OFFLINE=1 PI_TELEMETRY=0 npm run build:offline
+          node ../automation/scripts/pack-fork.mjs . "$RUNNER_TEMP/fork-package" "$(git rev-parse HEAD)"
+          git diff --exit-code
+      - name: Check native behavior on the maintained fork
+        run: node extension/scripts/ci-compat.mjs fork extension automation "$RUNNER_TEMP/fork-package"
