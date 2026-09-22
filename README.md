@@ -95,5 +95,7 @@ executes and journals tools, navigates branches, resumes, and compacts. An optio
 native-window test checks the maintained fork's transient recovery snapshot; it
 skips on official hosts without windows and is required with `PI_COMPAT_HOST=fork`.
 Use a disposable HOME/agent directory and no provider credentials. The extension
-continues to use the Pi 0.84.1 API floor; current official and fork cohorts are
-qualified independently.
+continues to use the Pi 0.84.1 API floor. CI runs the full check on the declared
+official Pi cohort with Node 22.19.0, then the native lifecycle tests and
+typechecking on the pinned maintained fork with Node 24. A fresh production-only
+checkout must register `todo_list` and `/todos` through each host's CLI.
