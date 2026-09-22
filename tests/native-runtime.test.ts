@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 // Script only model output. Pi owns loading, tool execution, persistence and event delivery.
-async function fixture() {
+async function fixture(resultErrorTitle?: string) {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-native-"));
   const cwd = join(root, "project");
   const agentDir = join(root, "agent");
@@ -39,6 +39,12 @@ async function fixture() {
       additionalExtensionPaths: [fileURLToPath(new URL("../extensions/todo-list.ts", import.meta.url))],
       extensionFactories: [(pi) => {
         pi.on("context", (event) => { contexts.push(structuredClone(event.messages)); });
+        pi.on("tool_result", (event) => {
+          if (resultErrorTitle && event.toolName === "todo_list"
+            && event.input.action === "add" && event.input.text === resultErrorTitle) {
+            return { isError: true };
+          }
+        });
         pi.on("session_before_compact", (event) => ({ compaction: {
           summary: "Offline fixture summary; deliberately no todo state",
           firstKeptEntryId: event.preparation.firstKeptEntryId,
@@ -56,32 +62,37 @@ async function fixture() {
     assert.deepEqual(session.getActiveToolNames(), ["todo_list"]);
     return session;
   };
-  const prompt = async (args: ToolCall["arguments"]) => {
+  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false) => {
     assert(session);
-    const id = `todo-${++callId}`;
+    const calls: ToolCall[] = (Array.isArray(args) ? args : [args]).map((arguments_) => ({
+      type: "toolCall", id: `todo-${++callId}`, name: "todo_list", arguments: arguments_,
+    }));
     let turn = 0;
     contexts = [];
     session.agent.streamFunction = () => {
-      const calls: ToolCall[] | undefined = turn++ === 0
-        ? [{ type: "toolCall", id, name: "todo_list", arguments: args }] : undefined;
+      const toolCalls = turn++ === 0 ? calls : undefined;
       const message: AssistantMessage = {
-        role: "assistant", content: calls ?? [{ type: "text", text: "done" }],
-        api: model.api, provider: model.provider, model: model.id, stopReason: calls ? "toolUse" : "stop",
+        role: "assistant", content: toolCalls ?? [{ type: "text", text: "done" }],
+        api: model.api, provider: model.provider, model: model.id, stopReason: toolCalls ? "toolUse" : "stop",
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: Date.now(),
       };
       const stream = createAssistantMessageEventStream();
-      stream.push({ type: "done", reason: calls ? "toolUse" : "stop", message });
+      stream.push({ type: "done", reason: toolCalls ? "toolUse" : "stop", message });
       return stream;
     };
     await session.prompt("Run the scripted todo operation.");
     await session.waitForIdle();
     assert.deepEqual(errors, []);
-    const entry = session.sessionManager.getBranch().find((entry) =>
-      entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId === id);
-    assert(entry?.type === "message" && entry.message.role === "toolResult");
-    assert.equal(entry.message.isError, false, contentText(entry.message.content));
-    return { entryId: entry.id, text: contentText(entry.message.content), contexts };
+    const branch = session.sessionManager.getBranch();
+    const results = calls.map((call) => {
+      const entry = branch.find((entry) => entry.type === "message"
+        && entry.message.role === "toolResult" && entry.message.toolCallId === call.id);
+      assert(entry?.type === "message" && entry.message.role === "toolResult");
+      assert.equal(entry.message.isError, expectError, contentText(entry.message.content));
+      return { entryId: entry.id, text: contentText(entry.message.content), details: entry.message.details };
+    });
+    return { ...results[0]!, results, contexts };
   };
   return {
     start, prompt,
@@ -121,6 +132,65 @@ test("native todo tool persists, follows tree selection, resumes, and survives c
   } finally { await f.cleanup(); }
 });
 
+test("native committed todo survives a downstream result error and disk resume", { timeout: 30_000 }, async () => {
+  const f = await fixture("Committed despite presentation error");
+  try {
+    const session = await f.start(f.createManager());
+    const committed = await f.prompt({ action: "add", text: "Committed despite presentation error" }, true);
+    assert.match(JSON.stringify(committed.details), /"operations"/);
+    assert.match((await f.prompt({ action: "list" })).text, /#1 Committed despite presentation error/);
+    const file = session.sessionFile;
+    assert(file);
+    f.close();
+    await f.start(SessionManager.open(file));
+    assert.match((await f.prompt({ action: "list" })).text, /#1 Committed despite presentation error/);
+    await f.prompt({ action: "remove", id: 999 }, true);
+    f.close();
+    await f.start(SessionManager.open(file));
+    assert.match((await f.prompt({ action: "list" })).text, /#1 Committed despite presentation error/);
+  } finally { await f.cleanup(); }
+});
+
+test("native sibling results preserve reference commits and exact branch boundaries", { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    let session = await f.start(f.createManager());
+    await f.prompt({ action: "batch", operations: [
+      { action: "add", text: "Old work" }, { action: "complete", id: 1 }, { action: "clear_completed" },
+    ] });
+    const siblings = await f.prompt([
+      { action: "batch", operations: [
+        { action: "add", text: "Paused parent", status: "paused", ref: "001", link: "/notes/parent.md" },
+        { action: "add", text: "Active child", status: "in_progress", parentId: "001" },
+      ] },
+      { action: "add", text: "Later sibling", status: "completed" },
+    ]);
+    const [first, second] = siblings.results;
+    assert(first && second);
+    assert.match(first.text, /Added #2: Paused parent/);
+    assert.match(second.text, /Added #4: Later sibling/);
+    const persisted = JSON.stringify(first.details);
+    assert.match(persisted, /"parentId":2/);
+    assert.doesNotMatch(persisted, /"ref"|"parentId":"001"/);
+    assert.match((await f.prompt({ action: "list", id: 4 })).text, /Status: completed/);
+
+    assert.equal((await session.navigateTree(first.entryId, { summarize: false })).cancelled, false);
+    assert.match((await f.prompt({ action: "add", text: "Branch allocation" })).text, /Added #4: Branch allocation/);
+    await session.reload();
+    const file = session.sessionFile;
+    assert(file);
+    f.close();
+    session = await f.start(SessionManager.open(file));
+    await session.compact();
+    const restored = await f.prompt({ action: "list" });
+    assert.match(restored.text, /1 active, 1 pending, 1 paused, 0 completed/);
+    assert.doesNotMatch(restored.text, /Later sibling/);
+    assert.equal((await f.prompt({ action: "list", id: 3 })).text,
+      "#3 Active child\nStatus: in progress\nParent: #2");
+    assert.match((await f.prompt({ action: "list", id: 2 })).text, /Status: paused\nDetails: \/notes\/parent.md/);
+  } finally { await f.cleanup(); }
+});
+
 type WindowSession = AgentSession & { newContext?: (options?: { handoff?: string }) => void };
 const hasWindows = typeof (AgentSession.prototype as WindowSession).newContext === "function";
 if (process.env.PI_COMPAT_HOST === "fork" && !hasWindows) {
@@ -133,7 +203,10 @@ test("native fresh windows inject the pre-window todo snapshot without persistin
   const f = await fixture();
   try {
     const session = await f.start(f.createManager()) as WindowSession;
-    await f.prompt({ action: "add", text: "ALPHA window task" });
+    await f.prompt({ action: "batch", operations: [
+      { action: "add", text: "ALPHA window task", status: "paused", ref: "parent" },
+      { action: "add", text: "BETA window child", status: "in_progress", parentId: "parent" },
+    ] });
     session.newContext!({ handoff: "Continue with a fresh context" });
     assert(session.sessionManager.getBranch().some((entry) => (entry as { type: string }).type === "context_window"));
     const result = await f.prompt({ action: "list" });
@@ -142,6 +215,8 @@ test("native fresh windows inject the pre-window todo snapshot without persistin
       const snapshots = messages.filter((message) => message.role === "custom" && message.customType === "todo-list-context");
       assert.equal(snapshots.length, 1);
       assert.match(JSON.stringify(snapshots), /ALPHA window task/);
+      assert.match(JSON.stringify(snapshots), /BETA window child/);
+      assert.match(JSON.stringify(snapshots), /1 active, 0 pending, 1 paused/);
     }
     assert.equal(session.sessionManager.getBranch().filter((entry) =>
       entry.type === "custom_message" && entry.customType === "todo-list-context").length, 0);

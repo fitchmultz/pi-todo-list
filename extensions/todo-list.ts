@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import {
   applyTodoBatch,
   applyTodoMutation,
+  normalizeTodoMutation,
   cloneState,
   emptyState,
   formatTodoContext,
@@ -17,15 +18,17 @@ import {
   TODO_MUTATIONS,
   TODO_TEXT_LIMIT,
   TODO_LINK_LIMIT,
+  TODO_REF_LIMIT,
+  TODO_STATUSES,
+  BATCH_OPERATION_LIMIT,
   type TodoMutation,
   type TodoState,
 } from "./todo-state.ts";
 
 const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
 const TODO_CONTEXT_TYPE = "todo-list-context";
-const DETAILS_VERSION = 5;
+const DETAILS_VERSION = 7;
 const RECOVERY_VERSION = 6;
-const BATCH_OPERATION_LIMIT = 100;
 const WIDGET_LIMIT = 8;
 
 interface LegacySnapshotDetails {
@@ -39,11 +42,11 @@ interface RecoveryDetails {
 }
 type SnapshotDetails = LegacySnapshotDetails | RecoveryDetails;
 interface MutationDetails {
-  version: 3 | 5;
+  version: 3 | 5 | 7;
   operations: TodoMutation[];
 }
 interface ReadDetails {
-  version: 3 | 5;
+  version: 3 | 5 | 7;
   read: "list";
 }
 const Link = Type.Optional(Type.Union([
@@ -51,12 +54,20 @@ const Link = Type.Optional(Type.Union([
   Type.Null(),
 ], { description: "URL or note/file path for details on add or update; null clears it. Keep evidence out of the title" }));
 
+const Status = Type.Optional(StringEnum(TODO_STATUSES, { description: "Initial status for add; defaults to pending" }));
+const BatchId = Type.Optional(Type.Union([
+  Type.Integer({ minimum: 1 }),
+  Type.String({ minLength: 1, maxLength: TODO_REF_LIMIT }),
+], { description: "Existing numeric todo ID or an earlier add's ref in this batch" }));
+
 const Mutation = Type.Object({
   action: StringEnum(TODO_MUTATIONS),
-  id: Type.Optional(Type.Integer({ minimum: 1 })),
+  id: BatchId,
   text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT })),
   link: Link,
-  parentId: Type.Optional(Type.Integer({ minimum: 1 })),
+  parentId: BatchId,
+  status: Status,
+  ref: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_REF_LIMIT, description: "Label on add for later id/parentId references in this batch only" })),
 });
 
 const Params = Type.Object({
@@ -64,6 +75,7 @@ const Params = Type.Object({
   id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID for list (one item with its detail link), update, move, start, pause, complete, reopen, or remove" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT, description: "Short action title for add or update; put hashes, logs, and evidence in the linked details" })),
   link: Link,
+  status: Status,
   parentId: Type.Optional(Type.Integer({ minimum: 1, description: "Parent todo ID for add or move; omit on move to make it top-level" })),
   operations: Type.Optional(Type.Array(Mutation, { minItems: 1, maxItems: BATCH_OPERATION_LIMIT, description: "Required for batch. Ordered mutations applied atomically" })),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based offset into the open items" })),
@@ -76,7 +88,10 @@ type BranchEntry = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[n
 
 function entryDetails(entry: BranchEntry): unknown {
   if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "todo_list") {
-    return entry.message.isError ? NO_TODO_CHANGE : entry.message.details;
+    const { details, isError } = entry.message;
+    // A result hook can mark a committed mutation as an error after execute returns.
+    if (isError && !isSnapshot(details) && !isMutationLog(details) && !isReadMarker(details)) return NO_TODO_CHANGE;
+    return details;
   }
   return NOT_TODO_RESULT;
 }
@@ -98,7 +113,7 @@ function isSnapshot(details: unknown): details is SnapshotDetails {
 function isMutationLog(details: unknown): details is MutationDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; operations?: unknown };
-  return (candidate.version === 3 || candidate.version === DETAILS_VERSION)
+  return (candidate.version === 3 || candidate.version === 5 || candidate.version === DETAILS_VERSION)
     && Array.isArray(candidate.operations)
     && candidate.operations.length > 0
     && candidate.operations.length <= BATCH_OPERATION_LIMIT
@@ -108,7 +123,7 @@ function isMutationLog(details: unknown): details is MutationDetails {
 function isReadMarker(details: unknown): details is ReadDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; read?: unknown };
-  return (candidate.version === 3 || candidate.version === DETAILS_VERSION) && candidate.read === "list" && hasExactKeys(details, ["version", "read"]);
+  return (candidate.version === 3 || candidate.version === 5 || candidate.version === DETAILS_VERSION) && candidate.read === "list" && hasExactKeys(details, ["version", "read"]);
 }
 
 function validatedSnapshot(details: SnapshotDetails): TodoState | undefined {
@@ -129,9 +144,24 @@ function validatedSnapshot(details: SnapshotDetails): TodoState | undefined {
   }
 }
 
+function decodeLegacyOperation(value: unknown, version: 3 | 5): TodoMutation {
+  if (!value || typeof value !== "object") throw new Error("Invalid legacy todo operation");
+  const old = value as TodoMutation;
+  // Old logs kept ignored inputs, including update.parentId and add.status/ref.
+  const operation: TodoMutation = { action: old.action };
+  if (old.action !== "add" && old.action !== "clear_completed") operation.id = old.id;
+  if (old.action === "add" || old.action === "update") {
+    operation.text = old.text;
+    if (version === 5) operation.link = old.link;
+  }
+  if (old.action === "add" || old.action === "move") operation.parentId = old.parentId;
+  return normalizeTodoMutation(operation);
+}
+
 function replayLog(state: TodoState, log: MutationDetails): void {
-  for (const operation of log.operations) {
-    applyTodoMutation(state, operation);
+  for (const stored of log.operations) {
+    const operation = log.version === DETAILS_VERSION ? normalizeTodoMutation(stored) : decodeLegacyOperation(stored, log.version);
+    applyTodoMutation(state, operation, false);
     // Before v5, pause meant pending. Preserve the state of those older branches.
     if (log.version === 3 && operation.action === "pause") state.items.find((todo) => todo.id === operation.id)!.status = "pending";
   }
@@ -305,12 +335,15 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       "Use short action titles in todo_list; keep hashes, logs, and evidence in a linked note/file or URL via link. Use list with id to retrieve that link. When using notes, update one concise current summary in place: goal, current state, next step, blockers, and evidence links, not a running history.",
       "Update stale todo_list titles and statuses when plans change; remove work that no longer applies. Batch related mutations. Leave no item open when you report multi-step work finished; the counts in each result cover that without an extra call.",
       "Starting, pausing, or reopening a nested todo with todo_list reopens completed ancestors.",
+      "Use todo_list add with status to create work in its current state. In a batch, label additions with ref and use those labels as later id/parentId values.",
     ],
     parameters: Params,
     // No executionMode: execute() never awaits, and one sequential tool serializes the whole tool batch.
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       let message: string;
       let details: MutationDetails | ReadDetails | RecoveryDetails;
+      if (params.status !== undefined && params.action !== "add") throw new Error("status is only supported for add");
+      if (Object.hasOwn(params, "ref")) throw new Error("ref is only supported on add inside a batch");
       if (params.action === "list") {
         message = params.id === undefined
           ? formatTodoPage(state, params.offset ?? 0, params.limit ?? LIST_PAGE_LIMIT)
@@ -318,23 +351,16 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         details = { version: DETAILS_VERSION, read: "list" };
       } else if (params.action === "batch") {
         if (!params.operations) throw new Error("operations is required for batch");
-        const messages = applyTodoBatch(state, params.operations);
-        message = `Applied ${messages.length} operation(s):\n${messages.map((result) => `- ${result}`).join("\n")}`;
-        details = { version: DETAILS_VERSION, operations: params.operations.map((operation) => ({ ...operation })) };
+        const batch = applyTodoBatch(state, params.operations);
+        message = `Applied ${batch.messages.length} operation(s):\n${batch.messages.map((result) => `- ${result}`).join("\n")}`;
+        details = { version: DETAILS_VERSION, operations: batch.operations };
       } else {
-        const operation: TodoMutation = {
-          action: params.action,
-          id: params.id,
-          text: params.text,
-          parentId: params.parentId,
-          link: params.link,
-        };
+        const operation = normalizeTodoMutation(params);
         message = applyTodoMutation(state, operation);
         details = { version: DETAILS_VERSION, operations: [operation] };
       }
 
-      // State is already mutated here. An error result is skipped on restore, so
-      // letting a render failure escape would drop this change on the next resume.
+      // State is already mutated; a render failure must not prevent returning its commit.
       try {
         updateWidget(ctx);
       } catch {}
