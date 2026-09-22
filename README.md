@@ -68,7 +68,7 @@ npm run check:compat
 pi -e ./extensions/todo-list.ts --list-models
 ```
 
-The development cohort is official Pi 0.86.1. `check:compat` runs the existing state
+The development cohort is official Pi 0.87.0. `check:compat` runs the existing state
 suite, native SDK lifecycle tests, typechecking, and a pack dry-run against the
 installed host. Native tests script only model output: Pi loads the extension,
 executes and journals tools, navigates branches, resumes, and compacts. An optional
