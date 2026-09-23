@@ -976,10 +976,9 @@ test("UI updates and commands honor availability", async () => {
   assert.equal(headless.notifications.length, 0);
 });
 
-test("todo_list opts into parallel tool batches and mutates atomically", async () => {
+test("todo_list serializes sibling tool batches and mutates atomically", async () => {
   const harness = createExtensionHarness();
-  // Pi serializes an entire tool batch when any tool in it declares executionMode "sequential".
-  assert.equal(harness.toolDefinition().executionMode, undefined);
+  assert.equal(harness.toolDefinition().executionMode, "sequential");
 
   await harness.execute({ action: "add", text: "Parent" });
   const concurrent = (await Promise.all([

@@ -228,6 +228,25 @@ test("native sibling results preserve reference commits and exact branch boundar
   } finally { await f.cleanup(); }
 });
 
+test("native sibling todo IDs survive delayed execution and reload", { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    const session = await f.start(f.createManager());
+    session.agent.subscribe(async (event) => {
+      const prepared = event as { type: string; toolName?: string; args?: { text?: string } };
+      if (prepared.type === "tool_execution_prepared" && prepared.toolName === "todo_list" && prepared.args?.text === "Delayed first") {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    });
+    await f.prompt([{ action: "add", text: "Delayed first" }, { action: "add", text: "Fast second" }]);
+    const beforeReload = (await f.prompt({ action: "list" })).text;
+    assert.match(beforeReload, /Delayed first/);
+    assert.match(beforeReload, /Fast second/);
+    await session.reload();
+    assert.equal((await f.prompt({ action: "list" })).text, beforeReload);
+  } finally { await f.cleanup(); }
+});
+
 type WindowSession = AgentSession & { newContext?: (options?: { handoff?: string }) => void };
 const hasWindows = typeof (AgentSession.prototype as WindowSession).newContext === "function";
 if (process.env.PI_COMPAT_HOST === "fork" && !hasWindows) {
