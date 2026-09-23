@@ -88,6 +88,7 @@ type BranchEntry = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[n
 
 function entryDetails(entry: BranchEntry): unknown {
   if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "todo_list") {
+    if ("namespace" in entry.message && entry.message.namespace !== undefined) return NOT_TODO_RESULT;
     const { details, isError } = entry.message;
     // A result hook can mark a committed mutation as an error after execute returns.
     if (isError && !isSnapshot(details) && !isMutationLog(details) && !isReadMarker(details)) return NO_TODO_CHANGE;

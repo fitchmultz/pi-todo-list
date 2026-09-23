@@ -1001,6 +1001,29 @@ test("todo_list opts into parallel tool batches and mutates atomically", async (
   );
 });
 
+test("namespaced todo_list results cannot change the local list on restore", async () => {
+  const source = createExtensionHarness();
+  await source.execute({ action: "add", text: "ALPHA retained" });
+  await source.execute({ action: "add", text: "BETA retained" });
+  for (const details of [
+    { source: "unrelated-tool" },
+    { version: 7, operations: [{ action: "clear_completed" }, { action: "remove", id: 1 }] },
+    { version: 6, state: { items: [], nextId: 1 } },
+  ]) {
+    const branch = source.branch();
+    branch.splice(1, 0, { type: "message", message: {
+      role: "toolResult", toolName: "todo_list", namespace: "other", isError: false, details,
+    } });
+    const resumed = createExtensionHarness();
+    for (const restore of [() => resumed.startSession(branch), () => resumed.switchBranch(branch)]) {
+      restore();
+      assert.equal((await resumed.execute({ action: "list" }))?.content[0]?.text,
+        "TODO: 0 active, 2 pending, 0 completed\n- #1 ALPHA retained\n- #2 BETA retained");
+      assert.deepEqual(resumed.notifications, []);
+    }
+  }
+});
+
 test("committed mutation details survive a downstream error flag", async () => {
   const source = createExtensionHarness();
   await source.execute({ action: "add", text: "Committed before postprocessing" });
