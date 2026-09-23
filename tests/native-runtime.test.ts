@@ -233,8 +233,8 @@ test("native sibling todo IDs survive delayed execution and reload", { timeout: 
   try {
     const session = await f.start(f.createManager());
     session.agent.subscribe(async (event) => {
-      const prepared = event as typeof event | { type: "tool_execution_prepared"; toolName: string; args: { text?: string } };
-      if (prepared.type === "tool_execution_prepared" && prepared.toolName === "todo_list" && prepared.args.text === "Delayed first") {
+      const prepared = event as { type: string; toolName?: string; args?: { text?: string } };
+      if (prepared.type === "tool_execution_prepared" && prepared.toolName === "todo_list" && prepared.args?.text === "Delayed first") {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     });
