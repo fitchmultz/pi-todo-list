@@ -72,7 +72,7 @@ When using notes, maintain one brief current summary: goal, current state, next 
 
 ## Caching
 
-The tool definition and system-prompt guidance are static. Mutations return only the change and status counts. Initial windows and ordinary requests add no todo context. After compaction, the extension injects one recovery summary with at most five active, five pending, and five paused titles for the retry or next request; inside a native window it queues the summary as soon as a later compaction replaces the window marker. At a native boundary, it injects the boundary-time snapshot immediately after Pi's marker and reuses that exact message for the rest of the window. The snapshot is labeled as a recovery snapshot: later tool results carry current state without rewriting the provider-cacheable prefix.
+The tool definition and system-prompt guidance are static. Mutations return only the change and status counts. Initial windows and ordinary requests add no todo context. After compaction, the extension injects one recovery summary with at most five active, five pending, and five paused titles for the retry or next request, including automatic compaction between tool turns; inside a native window it queues the summary as soon as a later compaction replaces the window marker. At a native boundary, it injects the boundary-time snapshot immediately after Pi's marker and reuses that exact message for the rest of the window. The snapshot is labeled as a recovery snapshot: later tool results carry current state without rewriting the provider-cacheable prefix.
 
 ## State behavior
 
