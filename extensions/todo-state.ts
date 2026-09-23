@@ -276,6 +276,8 @@ export function normalizeTodoMutation(value: unknown, refs?: ReadonlyMap<string,
   const fields = MUTATION_FIELDS[action];
   for (const key of Object.keys(input)) {
     if (input[key] === undefined || key === "action" || fields.includes(key)) continue;
+    // Strict-schema callers can send null for an unused link.
+    if (key === "link" && input[key] === null) continue;
     if (key === "ref" && action === "add" && refs) {
       validateRef(input.ref);
       if (refs.has(input.ref)) throw new Error(`Duplicate batch ref: ${input.ref}`);
@@ -302,7 +304,7 @@ export function normalizeTodoMutation(value: unknown, refs?: ReadonlyMap<string,
     if (typeof input.text !== "string") throw new Error("Todo text must be a string");
     operation.text = concise(input.text);
   }
-  if (input.link !== undefined) operation.link = normalizeLink(input.link as string | null) ?? null;
+  if (fields.includes("link") && input.link !== undefined) operation.link = normalizeLink(input.link as string | null) ?? null;
   if (input.status !== undefined) {
     if (!TODO_STATUSES.includes(input.status as TodoStatus)) throw new Error("Invalid todo status");
     operation.status = input.status as TodoStatus;

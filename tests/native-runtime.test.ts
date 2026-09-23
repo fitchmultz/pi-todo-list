@@ -132,6 +132,43 @@ test("native todo tool persists, follows tree selection, resumes, and survives c
   } finally { await f.cleanup(); }
 });
 
+test("native null link placeholders work without changing explicit link clearing", { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    const session = await f.start(f.createManager());
+    await f.prompt({ action: "add", text: "Linked task", link: "/notes/task.md" });
+    const completed = await f.prompt({
+      action: "complete", id: 1, text: null, link: null, status: null,
+      parentId: null, operations: null, offset: null, limit: null,
+    });
+    assert.deepEqual(completed.details, { version: 7, operations: [{ action: "complete", id: 1 }] });
+    assert.equal((await f.prompt({ action: "list", id: 1 })).text,
+      "#1 Linked task\nStatus: completed\nDetails: /notes/task.md");
+
+    const operations = [
+      { action: "reopen", id: 1 }, { action: "start", id: 1 },
+      { action: "pause", id: 1 }, { action: "move", id: 1 },
+    ];
+    const batch = await f.prompt({
+      action: "batch", operations: operations.map((operation) => ({ ...operation, link: null })),
+    });
+    assert.deepEqual(batch.details, { version: 7, operations });
+    await session.reload();
+    assert.equal((await f.prompt({ action: "list", id: 1 })).text,
+      "#1 Linked task\nStatus: paused\nDetails: /notes/task.md");
+
+    await f.prompt({ action: "update", id: 1, link: null });
+    assert.equal((await f.prompt({ action: "list", id: 1 })).text, "#1 Linked task\nStatus: paused");
+    await f.prompt({ action: "batch", operations: [
+      { action: "add", text: "Temporary task", link: null },
+      { action: "remove", id: 2, link: null },
+      { action: "complete", id: 1, link: null },
+      { action: "clear_completed", link: null },
+    ] });
+    assert.equal((await f.prompt({ action: "list" })).text, "No todos");
+  } finally { await f.cleanup(); }
+});
+
 test("native committed todo survives a downstream result error and disk resume", { timeout: 30_000 }, async () => {
   const f = await fixture("Committed despite presentation error");
   try {
