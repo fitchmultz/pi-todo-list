@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Restore the todo reminder before the next response after automatic between-turn compaction.
 - Accept unused `link: null` placeholders on todo lifecycle actions, including batch operations, while preserving explicit link clearing on updates.
 - Keep todo IDs stable across sibling tool calls and session reloads by executing them in order.
 

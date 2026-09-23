@@ -62,7 +62,7 @@ async function fixture(resultErrorTitle?: string) {
     assert.deepEqual(session.getActiveToolNames(), ["todo_list"]);
     return session;
   };
-  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false) => {
+  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false, inputTokens = 0) => {
     assert(session);
     const calls: ToolCall[] = (Array.isArray(args) ? args : [args]).map((arguments_) => ({
       type: "toolCall", id: `todo-${++callId}`, name: "todo_list", arguments: arguments_,
@@ -74,7 +74,7 @@ async function fixture(resultErrorTitle?: string) {
       const message: AssistantMessage = {
         role: "assistant", content: toolCalls ?? [{ type: "text", text: "done" }],
         api: model.api, provider: model.provider, model: model.id, stopReason: toolCalls ? "toolUse" : "stop",
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+        usage: { input: toolCalls ? inputTokens : 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: toolCalls ? inputTokens : 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: Date.now(),
       };
       const stream = createAssistantMessageEventStream();
@@ -129,6 +129,25 @@ test("native todo tool persists, follows tree selection, resumes, and survives c
     assert.equal(snapshots.length, 1, "ordinary compaction must inject one live recovery snapshot");
     assert.match(JSON.stringify(snapshots), /ALPHA retained task/);
     assert.doesNotMatch(JSON.stringify(snapshots), /BETA abandoned task/);
+  } finally { await f.cleanup(); }
+});
+
+test("native threshold compaction restores todos before the next response in the same prompt", { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    const session = await f.start(f.createManager());
+    await f.prompt({ action: "add", text: "Required release check", status: "in_progress" });
+    session.settingsManager.setCompactionEnabled(true);
+    // Provider usage crosses the 200k window's threshold after this tool call.
+    // The list page deliberately contains no titles, and the summary omits todos.
+    const result = await f.prompt({ action: "list", offset: 1 }, false, 190_000);
+    assert(session.sessionManager.getBranch().some((entry) => entry.type === "compaction"));
+    assert.equal(result.contexts.length, 2);
+    const nextRequest = result.contexts[1]!;
+    const snapshots = nextRequest.filter((message) => message.role === "custom" && message.customType === "todo-list-context");
+    assert.equal(snapshots.length, 1);
+    assert.match(JSON.stringify(snapshots), /Required release check/);
+    assert.match(JSON.stringify(snapshots), /1 active/);
   } finally { await f.cleanup(); }
 });
 

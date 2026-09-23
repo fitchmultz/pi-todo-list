@@ -312,12 +312,12 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   });
 
   // A later compaction drops a native window's transient marker and snapshot.
-  // Queue live state immediately for that window, or for an overflow retry.
+  // Queue live state for that window, overflow retries, and between-turn compaction.
   pi.on("session_compact", (event, ctx) => {
     const inNativeWindow = ctx.sessionManager.getBranch().some((entry) =>
       (entry as { type: string }).type === "context_window"
     );
-    if ((event.willRetry || inNativeWindow) && hasTodoHistory()) {
+    if ((event.reason === "threshold" || event.willRetry || inNativeWindow) && hasTodoHistory()) {
       pi.sendMessage(todoContextMessage(), { deliverAs: "steer" });
     }
   });
