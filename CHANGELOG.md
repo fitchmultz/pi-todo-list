@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Accept unused `link: null` placeholders on todo lifecycle actions, including batch operations, while preserving explicit link clearing on updates.
+
 ## [0.8.0] - 2026-09-22
 
 ### Added
