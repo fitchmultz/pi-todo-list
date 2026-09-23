@@ -339,7 +339,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       "Use todo_list add with status to create work in its current state. In a batch, label additions with ref and use those labels as later id/parentId values.",
     ],
     parameters: Params,
-    // No executionMode: execute() never awaits, and one sequential tool serializes the whole tool batch.
+    executionMode: "sequential",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       let message: string;
       let details: MutationDetails | ReadDetails | RecoveryDetails;

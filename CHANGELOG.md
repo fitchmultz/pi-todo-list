@@ -5,6 +5,7 @@
 ### Fixed
 
 - Accept unused `link: null` placeholders on todo lifecycle actions, including batch operations, while preserving explicit link clearing on updates.
+- Keep todo IDs stable across sibling tool calls and session reloads by executing them in order.
 
 ## [0.8.0] - 2026-09-22
 
