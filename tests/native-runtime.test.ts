@@ -60,6 +60,7 @@ async function fixture(resultErrorTitle?: string) {
     }));
     await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error) });
     assert.deepEqual(session.getActiveToolNames(), ["todo_list"]);
+    assert(session.extensionRunner.getCommand("todos"));
     return session;
   };
   const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false, inputTokens = 0) => {

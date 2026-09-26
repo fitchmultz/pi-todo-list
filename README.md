@@ -89,10 +89,10 @@ npm run check:compat
 pi -e ./extensions/todo-list.ts --list-models
 ```
 
-The development and minimum supported Pi cohort is official 0.87.1. `check:compat`
-runs the state suite, native SDK lifecycle tests, typechecking, and a pack dry-run
-against the installed host. Native tests script only model output: Pi loads the
-extension, executes and journals tools, navigates branches, resumes, and compacts.
+`check:compat` runs the state suite, native SDK lifecycle tests, typechecking, and a
+pack dry-run against the installed host. Native tests script only model output: Pi
+loads the extension, registers `todo_list` and `/todos`, executes and journals tools,
+navigates branches, resumes, and compacts.
 The native-window test checks the maintained fork's transient recovery snapshot; it
 skips on official hosts without windows and is required with `PI_COMPAT_HOST=fork`.
 Use a disposable HOME/agent directory and no provider credentials.
@@ -100,7 +100,4 @@ Use a disposable HOME/agent directory and no provider credentials.
 CI uses the shared [Pi compatibility automation](https://github.com/fitchmultz/.github)
 on Node 24 to run `check:compat` against official Pi and against the maintained fork at
 the commit pinned by that automation. A fresh production-only checkout must also
-register `todo_list` and `/todos` through each host's CLI.
-
-`.npmrc` sets `omit-lockfile-registry-resolved`, so the lockfile records integrity
-hashes without registry URLs and installs through any registry mirror.
+load through each host's CLI without extension errors.
