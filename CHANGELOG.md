@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-26
+
+### Changed
+
+- Require Node.js 24 and Pi 0.87.1 or later; update the development toolchain to TypeScript 7 and npm 12.
+- Qualify official Pi and the maintained fork through the shared compatibility automation.
+
 ### Fixed
 
 - Restore the todo reminder before the next response after automatic between-turn compaction.
