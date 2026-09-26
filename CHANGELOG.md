@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Guide the model to send todo updates, including the final completions, in the same tool batch as the related work instead of spending a separate model request on each update.
+
 ## [0.9.0] - 2026-09-26
 
 ### Changed

@@ -34,7 +34,7 @@ For a one-off run:
 pi -e ./extensions/todo-list.ts
 ```
 
-Then ask the agent to track the work. It will list todos when starting or resuming, mark items in progress, and leave nothing open when it reports the work finished. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
+Then ask the agent to track the work. It will list todos when starting or resuming, mark items in progress, and leave nothing open when it reports the work finished. It sends these updates alongside the related tool calls rather than as extra model requests. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
 
 `list` without an `id` returns up to 100 open items and counts the completed ones in its header, matching the widget and the post-compaction summary. Use its zero-based `offset` and optional `limit` to continue through larger lists.
 

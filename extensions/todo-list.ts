@@ -332,9 +332,9 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     description: "Manage persistent nested todos with pending, in-progress, paused, and completed states, including atomic batches. list shows open titles and counts; list with id shows one item and its detail link",
     promptSnippet: "Track current work with short titles, detail links, and a distinct paused state across context compaction",
     promptGuidelines: [
-      "Use todo_list at the start or resumption of multi-step work. Start items before working, complete them after verification, and pause interrupted work.",
+      "Use todo_list at the start or resumption of multi-step work. Send todo_list updates in the same tool batch as the work they track, not in a request of their own: add or start items with their first work call, complete verified items with the next call, and pause interrupted work.",
       "Use short action titles in todo_list; keep hashes, logs, and evidence in a linked note/file or URL via link. Use list with id to retrieve that link. When using notes, update one concise current summary in place: goal, current state, next step, blockers, and evidence links, not a running history.",
-      "Update stale todo_list titles and statuses when plans change; remove work that no longer applies. Batch related mutations. Leave no item open when you report multi-step work finished; the counts in each result cover that without an extra call.",
+      "Update stale todo_list titles and statuses when plans change; remove work that no longer applies. Batch related mutations. Leave no item open when you report multi-step work finished: complete the last items alongside your final tool call instead of in an extra request, and rely on each result's counts rather than a list call.",
       "Starting, pausing, or reopening a nested todo with todo_list reopens completed ancestors.",
       "Use todo_list add with status to create work in its current state. In a batch, label additions with ref and use those labels as later id/parentId values.",
     ],
