@@ -13,12 +13,13 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 
 ## Requirements
 
-- Pi 0.84.1 or later
+- Pi 0.87.1 or later (official releases and the maintained fork)
+- Node.js 24 or later
 
 ## Install
 
 ```bash
-pi install git:github.com/fitchmultz/pi-todo-list@v0.8.0
+pi install git:github.com/fitchmultz/pi-todo-list@v0.9.0
 ```
 
 For local development:
@@ -88,14 +89,15 @@ npm run check:compat
 pi -e ./extensions/todo-list.ts --list-models
 ```
 
-The development cohort is official Pi 0.87.0. `check:compat` runs the existing state
-suite, native SDK lifecycle tests, typechecking, and a pack dry-run against the
-installed host. Native tests script only model output: Pi loads the extension,
-executes and journals tools, navigates branches, resumes, and compacts. An optional
-native-window test checks the maintained fork's transient recovery snapshot; it
+`check:compat` runs the state suite, native SDK lifecycle tests, typechecking, and a
+pack dry-run against the installed host. Native tests script only model output: Pi
+loads the extension, registers `todo_list` and `/todos`, executes and journals tools,
+navigates branches, resumes, and compacts.
+The native-window test checks the maintained fork's transient recovery snapshot; it
 skips on official hosts without windows and is required with `PI_COMPAT_HOST=fork`.
-Use a disposable HOME/agent directory and no provider credentials. The extension
-continues to use the Pi 0.84.1 API floor. CI runs the full check on the declared
-official Pi cohort with Node 22.19.0, then the native lifecycle tests and
-typechecking on the pinned maintained fork with Node 24. A fresh production-only
-checkout must register `todo_list` and `/todos` through each host's CLI.
+Use a disposable HOME/agent directory and no provider credentials.
+
+CI uses the shared [Pi compatibility automation](https://github.com/fitchmultz/.github)
+on Node 24 to run `check:compat` against official Pi and against the maintained fork at
+the commit pinned by that automation. A fresh production-only checkout must also
+load through each host's CLI without extension errors.
