@@ -42,17 +42,17 @@ jobs:
       - id: targets
         run: |
           echo "official=$(node -p 'require("./extension/package.json").devDependencies["@earendil-works/pi-coding-agent"]')" >> "$GITHUB_OUTPUT"
-          echo "fork=$(node -p 'require("./automation/host-targets.json").forkRef')" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: fork
         with:
           repository: fitchmultz/pi
-          ref: ${{ steps.targets.outputs.fork }}
+          ref: main
           path: fork
           persist-credentials: false
-      - name: Build the reviewed fork package
+      - name: Build the current fork package
         working-directory: fork
         env:
-          FORK_REF: ${{ steps.targets.outputs.fork }}
+          FORK_REF: ${{ steps.fork.outputs.commit }}
           PI_OFFLINE: '1'
           PI_TELEMETRY: '0'
         run: |
@@ -72,7 +72,7 @@ jobs:
           --output "$RUNNER_TEMP/qualification-official"
       - name: Qualify maintained fork
         env:
-          PI_COMPAT_FORK_REF: ${{ steps.targets.outputs.fork }}
+          PI_COMPAT_FORK_REF: ${{ steps.fork.outputs.commit }}
         run: >
           node automation/scripts/qualify.mjs --repo pi-todo-list
           --source "$GITHUB_WORKSPACE/extension"
