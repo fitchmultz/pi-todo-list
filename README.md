@@ -9,7 +9,7 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 - Nested items with recursive completion and deletion
 - Paginated open-work listing plus an opt-in TUI widget and `/todos` controls
 - Session-local, branch-aware persistence through tool result details
-- Survives compaction, native context windows, resume, fork, and tree navigation
+- Survives compaction (including retain-none rollover), resume, fork, and tree navigation
 
 ## Requirements
 
@@ -73,11 +73,13 @@ When using notes, maintain one brief current summary: goal, current state, next 
 
 ## Caching
 
-The tool definition and system-prompt guidance are static. Mutations return only the change and status counts. Initial windows and ordinary requests add no todo context. After compaction, the extension injects one recovery summary with at most five active, five pending, and five paused titles for the retry or next request, including automatic compaction between tool turns; inside a native window it queues the summary as soon as a later compaction replaces the window marker. At a native boundary, it injects the boundary-time snapshot immediately after Pi's marker and reuses that exact message for the rest of the window. The snapshot is labeled as a recovery snapshot: later tool results carry current state without rewriting the provider-cacheable prefix.
+The tool definition and system-prompt guidance are static. Mutations return only the change and status counts. Ordinary requests add no todo context. After compaction, including retain-none rollover, the extension injects one recovery summary with at most five active, five pending, and five paused titles for the retry or next request, including automatic compaction between tool turns. The snapshot is labeled as a recovery snapshot: later tool results carry current state without rewriting the provider-cacheable prefix.
+
+Retain-none recovery reaches the first continued request in the same run. It is a request-only snapshot of the list at that boundary, not another journal entry, and stays byte-stable across later mutations and reloads.
 
 ## State behavior
 
-Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume and tree navigation replay those mutations on the active branch, using legacy snapshots and recovery checkpoints when present. Current entries use format 7 for mutations/reads and format 6 for recovery checkpoints. Mutation logs store resolved numeric IDs and initial statuses; older formats remain readable with their original semantics. Older format 3 pause operations retain their original pending state; old snapshots cannot distinguish paused work from other pending items. Native context-window snapshots are rebuilt from entries before their matching boundary, including an empty list that has prior todo history. If restore encounters corrupt history, it warns, preserves the contiguous valid state, and writes one recovery checkpoint on the next successful `todo_list` call. Validated committed mutations also survive restoration if another extension subsequently marks their tool result as an error; failed calls without a commit leave state unchanged. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
+Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume and tree navigation replay those mutations on the active branch, using legacy snapshots and recovery checkpoints when present. Current entries use format 7 for mutations/reads and format 6 for recovery checkpoints. Mutation logs store resolved numeric IDs and initial statuses; older formats remain readable with their original semantics. Older format 3 pause operations retain their original pending state; old snapshots cannot distinguish paused work from other pending items. Legacy context-window snapshot replay remains supported by the extension; current hosts use public compaction rather than native windows. Old-format journals must follow the host's conversion procedure rather than being resumed directly. If restore encounters corrupt history, it warns, preserves the contiguous valid state, and writes one recovery checkpoint on the next successful `todo_list` call. Validated committed mutations also survive restoration if another extension subsequently marks their tool result as an error; failed calls without a commit leave state unchanged. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
 
 Do not open sessions written by this version with an older extension: older releases do not understand format 7. Existing sessions remain readable by this version.
 
@@ -89,15 +91,17 @@ npm run check:compat
 pi -e ./extensions/todo-list.ts --list-models
 ```
 
+The development Pi cohort is official `0.99.1`.
+
 `check:compat` runs the state suite, native SDK lifecycle tests, typechecking, and a
 pack dry-run against the installed host. Native tests script only model output: Pi
 loads the extension, registers `todo_list` and `/todos`, executes and journals tools,
 navigates branches, resumes, and compacts.
-The native-window test checks the maintained fork's transient recovery snapshot; it
-skips on official hosts without windows and is required with `PI_COMPAT_HOST=fork`.
+The retain-none test checks recovery after the public compaction boundary discards
+all prior provider context, without requiring retired native-window APIs.
 Use a disposable HOME/agent directory and no provider credentials.
 
 CI uses the shared [Pi compatibility automation](https://github.com/fitchmultz/.github)
-on Node 24 to run `check:compat` against official Pi and against the maintained fork at
-the commit pinned by that automation. A fresh production-only checkout must also
+on Node 24 to run `check:compat` against official Pi and the maintained fork. It checks
+out the fork's `main` branch and qualifies that exact checkout, recording its commit SHA. A fresh production-only checkout must also
 load through each host's CLI without extension errors.

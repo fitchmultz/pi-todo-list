@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover todos on the first continued request after an in-run retain-none rollover. Retain-none recovery is a request-only boundary snapshot that stays stable across later mutations and reloads.
+
 ## [0.9.0] - 2026-09-26
 
 ### Changed

@@ -1,5 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ContextEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ContextWithSystemEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   applyTodoBatch,
@@ -218,7 +218,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   let state = emptyState();
   let recoveryNeeded = false;
   let widgetVisible = process.env.PI_TODO_WIDGET?.trim().toLowerCase() === "show";
-  let windowContext: { id: string; message: ContextEvent["messages"][number] | null } | undefined;
+  let boundaryContext: { id: string; message: ContextWithSystemEvent["messages"][number] | null } | undefined;
 
   const todoContextMessage = (snapshot = state) => ({
     customType: TODO_CONTEXT_TYPE,
@@ -232,7 +232,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       const entry = branch[index]!;
       if (entry.type === "custom_message" && entry.customType === TODO_CONTEXT_TYPE) return false;
       if ((entry as { type: string }).type === "context_window") return false;
-      if (entry.type === "compaction") return true;
+      // Retain-none recovery belongs to the request boundary, including in-run continuation.
+      if (entry.type === "compaction") return entry.firstKeptEntryId !== entry.id;
     }
     return false;
   };
@@ -266,7 +267,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   };
 
   const rehydrate = (ctx: ExtensionContext): void => {
-    windowContext = undefined;
+    boundaryContext = undefined;
     const restored = restore(ctx.sessionManager.getBranch());
     state = restored.state;
     recoveryNeeded = restored.recoveryNeeded;
@@ -279,7 +280,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => rehydrate(ctx));
   pi.on("session_tree", (_event, ctx) => rehydrate(ctx));
 
-  pi.on("context", (event, ctx) => {
+  pi.on("context_with_system", (event, ctx) => {
     if (event.messages.some((message) => message.role === "custom" && message.customType === TODO_CONTEXT_TYPE)) return;
     const markerIndex = event.messages.findIndex((message) =>
       message.role === "custom"
@@ -288,25 +289,46 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       && typeof message.details === "object"
       && typeof (message.details as { windowId?: unknown }).windowId === "string"
     );
-    if (markerIndex < 0) return;
+    if (markerIndex < 0) {
+      const branch = ctx.sessionManager.getBranch();
+      const index = branch.findLastIndex((entry) => entry.type === "compaction");
+      const boundary = branch[index];
+      if (boundary?.type !== "compaction" || boundary.firstKeptEntryId !== boundary.id) return;
+      if (boundaryContext?.id !== boundary.id) {
+        // Freeze the state at rollover; later results extend rather than rewrite this prefix.
+        const snapshot = restore(branch, index).state;
+        boundaryContext = {
+          id: boundary.id,
+          message: snapshot.items.length > 0 || snapshot.nextId > 1
+            ? { role: "custom", ...todoContextMessage(snapshot), timestamp: Date.parse(boundary.timestamp) }
+            : null,
+        };
+      }
+      if (!boundaryContext.message) return;
+      const indexAfterHead = event.messages[0]?.role === "system" ? 1 : 0;
+      return { messages: [
+        ...event.messages.slice(0, indexAfterHead), structuredClone(boundaryContext.message),
+        ...event.messages.slice(indexAfterHead),
+      ] };
+    }
 
-    const marker = event.messages[markerIndex] as ContextEvent["messages"][number] & { details: { windowId: string } };
+    const marker = event.messages[markerIndex] as ContextWithSystemEvent["messages"][number] & { details: { windowId: string } };
     const windowId = marker.details.windowId;
-    if (windowContext?.id !== windowId) {
+    if (boundaryContext?.id !== windowId) {
       const branch = ctx.sessionManager.getBranch();
       const boundaryIndex = branch.findIndex((entry) =>
         (entry as { type: string }).type === "context_window" && entry.id === windowId
       );
       if (boundaryIndex < 0) return;
       const snapshot = restore(branch, boundaryIndex).state;
-      windowContext = {
+      boundaryContext = {
         id: windowId,
         message: snapshot.items.length > 0 || snapshot.nextId > 1
           ? { role: "custom", ...todoContextMessage(snapshot), timestamp: marker.timestamp }
           : null,
       };
     }
-    const message = windowContext?.message;
+    const message = boundaryContext?.message;
     if (!message) return;
     return { messages: [...event.messages.slice(0, markerIndex + 1), structuredClone(message), ...event.messages.slice(markerIndex + 1)] };
   });

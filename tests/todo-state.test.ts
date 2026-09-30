@@ -611,7 +611,7 @@ test("paused state and detail links survive native replay and recovery without c
   const detail = "#2 Current pause\nStatus: paused\nParent: #1\nDetails: /repo/current.md";
   assert.equal((await resumed.execute({ action: "list", id: 2 }))?.content[0]?.text, detail);
   resumed.startContextWindow("paused-window");
-  const context = resumed.emit("context", { messages: [contextWindowMarker("paused-window")] });
+  const context = resumed.emit("context_with_system", { messages: [contextWindowMarker("paused-window")] });
   assert.match(context.messages[1].content, /⏸ #2 Current pause \[details\] \(under #1\)/);
   assert.doesNotMatch(context.messages[1].content, /\/repo\/current.md/);
 
@@ -834,18 +834,18 @@ const userMessage = (text: string) => ({ role: "user", content: [{ type: "text",
 
 test("native context injection has no initial-window or never-used-list tax", async () => {
   const harness = createExtensionHarness();
-  assert.equal(harness.emit("context", { messages: [userMessage("Initial request")] }), undefined);
+  assert.equal(harness.emit("context_with_system", { messages: [userMessage("Initial request")] }), undefined);
 
   await harness.execute({ action: "add", text: "Ordinary request" });
-  assert.equal(harness.emit("context", { messages: [userMessage("Still initial")] }), undefined);
+  assert.equal(harness.emit("context_with_system", { messages: [userMessage("Still initial")] }), undefined);
   await harness.execute({ action: "remove", id: 1 });
 
   const unused = createExtensionHarness();
   unused.startContextWindow("empty-window");
-  assert.equal(unused.emit("context", { messages: [contextWindowMarker("empty-window")] }), undefined);
+  assert.equal(unused.emit("context_with_system", { messages: [contextWindowMarker("empty-window")] }), undefined);
 
   harness.startContextWindow("empty-history-window");
-  const result = harness.emit("context", { messages: [contextWindowMarker("empty-history-window")] }) as {
+  const result = harness.emit("context_with_system", { messages: [contextWindowMarker("empty-history-window")] }) as {
     messages: Array<{ customType?: string; content?: string; display?: boolean }>;
   };
   assert.deepEqual(result.messages.slice(1), [{
@@ -865,7 +865,7 @@ test("native context injects the boundary-time todo snapshot immediately after i
 
   const marker = contextWindowMarker("window-a");
   const later = userMessage("Continue");
-  const result = harness.emit("context", { messages: [marker, later] }) as { messages: Array<Record<string, unknown>> };
+  const result = harness.emit("context_with_system", { messages: [marker, later] }) as { messages: Array<Record<string, unknown>> };
   assert.deepEqual(result.messages, [
     marker,
     {
@@ -884,14 +884,14 @@ test("native context keeps one byte-stable boundary snapshot after later mutatio
   await harness.execute({ action: "add", text: "Before boundary" });
   harness.startContextWindow("stable-window");
   const marker = contextWindowMarker("stable-window");
-  const first = harness.emit("context", { messages: [marker] }) as { messages: Array<Record<string, unknown>> };
+  const first = harness.emit("context_with_system", { messages: [marker] }) as { messages: Array<Record<string, unknown>> };
   const firstBytes = JSON.stringify(first.messages[1]);
   first.messages[1]!.content = "downstream mutation";
 
   await harness.execute({ action: "complete", id: 1 });
   assert.match((await harness.execute({ action: "clear_completed" }))?.content[0]?.text ?? "", /x #1: Before boundary/);
   await harness.execute({ action: "add", text: "After boundary" });
-  const repeated = harness.emit("context", { messages: [marker, userMessage("Later request")] }) as {
+  const repeated = harness.emit("context_with_system", { messages: [marker, userMessage("Later request")] }) as {
     messages: Array<Record<string, unknown>>;
   };
   assert.equal(JSON.stringify(repeated.messages[1]), firstBytes);
@@ -904,13 +904,13 @@ test("native context snapshots recompute on resume and tree navigation", async (
   previousSource.startContextWindow("shared-window");
   const harness = createExtensionHarness();
   harness.switchBranch(previousSource.branch());
-  harness.emit("context", { messages: [contextWindowMarker("shared-window")] });
+  harness.emit("context_with_system", { messages: [contextWindowMarker("shared-window")] });
 
   const resumeSource = createExtensionHarness();
   await resumeSource.execute({ action: "add", text: "Resume boundary" });
   resumeSource.startContextWindow("shared-window");
   harness.startSession(resumeSource.branch());
-  const resumed = harness.emit("context", { messages: [contextWindowMarker("shared-window")] }) as {
+  const resumed = harness.emit("context_with_system", { messages: [contextWindowMarker("shared-window")] }) as {
     messages: Array<{ content?: string }>;
   };
   assert.match(resumed.messages[1]?.content ?? "", /#1 Resume boundary/);
@@ -920,7 +920,7 @@ test("native context snapshots recompute on resume and tree navigation", async (
   await treeSource.execute({ action: "add", text: "Tree boundary" });
   treeSource.startContextWindow("shared-window");
   harness.switchBranch(treeSource.branch());
-  const navigated = harness.emit("context", { messages: [contextWindowMarker("shared-window")] }) as {
+  const navigated = harness.emit("context_with_system", { messages: [contextWindowMarker("shared-window")] }) as {
     messages: Array<{ content?: string }>;
   };
   assert.match(navigated.messages[1]?.content ?? "", /#1 Tree boundary/);
@@ -938,7 +938,7 @@ test("native context does not duplicate an existing todo context", async () => {
     display: false,
     timestamp: 2,
   };
-  assert.equal(harness.emit("context", { messages: [contextWindowMarker("deduplicated-window"), existing] }), undefined);
+  assert.equal(harness.emit("context_with_system", { messages: [contextWindowMarker("deduplicated-window"), existing] }), undefined);
 });
 
 test("UI updates and commands honor availability", async () => {
