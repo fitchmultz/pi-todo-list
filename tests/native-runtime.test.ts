@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { contentText, createAssistantMessageEventStream, type AssistantMessage, type ToolCall } from "@earendil-works/pi-ai";
+import { contentText, createAssistantMessageEventStream, type AssistantMessage, type ToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import {
   AgentSession, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
-  type ContextEvent,
+  type ContextWithSystemEvent, type ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 
 // Script only model output. Pi owns loading, tool execution, persistence and event delivery.
-async function fixture(resultErrorTitle?: string) {
+async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolCallEvent) => Promise<void>, producerOrder?: "before" | "after") {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-native-"));
   const cwd = join(root, "project");
   const agentDir = join(root, "agent");
@@ -23,22 +23,32 @@ async function fixture(resultErrorTitle?: string) {
   runtime.registerProvider("offline-todo", {
     api: "openai-completions", apiKey: "fixture-only", baseUrl: "http://127.0.0.1:1",
     models: [{ id: "scripted", name: "Scripted", reasoning: false, input: ["text"],
+      compat: { supportsMidConvoSystemMessages: true },
       contextWindow: 200_000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   });
   const model = runtime.getModel("offline-todo", "scripted");
   assert(model);
   const errors: unknown[] = [];
-  let contexts: ContextEvent["messages"][] = [];
+  let contexts: ContextWithSystemEvent["messages"][] = [];
+  let promptSection = "";
   let session: AgentSession | undefined;
   let callId = 0;
+  const todoPath = fileURLToPath(new URL("../extensions/todo-list.ts", import.meta.url));
+  const producerPath = fileURLToPath(new URL("./fixtures/retain-none.ts", import.meta.url));
+  const extensionPaths = producerOrder === "before" ? [producerPath, todoPath]
+    : producerOrder === "after" ? [todoPath, producerPath] : [todoPath];
   const start = async (sessionManager: SessionManager) => {
     const settings = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1 }, retry: { enabled: false } });
     const loader = new DefaultResourceLoader({
       cwd, agentDir, settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      additionalExtensionPaths: [fileURLToPath(new URL("../extensions/todo-list.ts", import.meta.url))],
+      additionalExtensionPaths: extensionPaths,
       extensionFactories: [(pi) => {
-        pi.on("context", (event) => { contexts.push(structuredClone(event.messages)); });
+        if (beforeToolCall) pi.on("tool_call", beforeToolCall);
+        pi.on("context_with_system", (event) => { contexts.push(structuredClone(event.messages)); });
+        pi.on("before_agent_start", (event) => {
+          if (promptSection) event.systemPromptOptions.sections.fixture = promptSection;
+        });
         pi.on("tool_result", (event) => {
           if (resultErrorTitle && event.toolName === "todo_list"
             && event.input.action === "add" && event.input.text === resultErrorTitle) {
@@ -54,6 +64,7 @@ async function fixture(resultErrorTitle?: string) {
     });
     await loader.reload({ resolveProjectTrust: async () => false });
     assert.deepEqual(loader.getExtensions().errors, []);
+    assert.deepEqual(loader.getExtensions().extensions.slice(0, extensionPaths.length).map((extension) => extension.path), extensionPaths);
     ({ session } = await createAgentSession({
       cwd, agentDir, resourceLoader: loader, settingsManager: settings, sessionManager,
       modelRuntime: runtime, model, thinkingLevel: "off", tools: ["todo_list"],
@@ -63,15 +74,19 @@ async function fixture(resultErrorTitle?: string) {
     assert(session.extensionRunner.getCommand("todos"));
     return session;
   };
-  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false, inputTokens = 0) => {
+  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false, inputTokens = 0, nextArgs?: ToolCall["arguments"]) => {
     assert(session);
     const calls: ToolCall[] = (Array.isArray(args) ? args : [args]).map((arguments_) => ({
       type: "toolCall", id: `todo-${++callId}`, name: "todo_list", arguments: arguments_,
     }));
+    const turns = [calls];
+    if (nextArgs) turns.push([{ type: "toolCall", id: `todo-${++callId}`, name: "todo_list", arguments: nextArgs }]);
+    const requests: TranscriptContext["messages"][] = [];
     let turn = 0;
     contexts = [];
-    session.agent.streamFunction = () => {
-      const toolCalls = turn++ === 0 ? calls : undefined;
+    session.agent.streamFunction = (_model, context) => {
+      requests.push(structuredClone(context.messages));
+      const toolCalls = turns[turn++];
       const message: AssistantMessage = {
         role: "assistant", content: toolCalls ?? [{ type: "text", text: "done" }],
         api: model.api, provider: model.provider, model: model.id, stopReason: toolCalls ? "toolUse" : "stop",
@@ -86,17 +101,18 @@ async function fixture(resultErrorTitle?: string) {
     await session.waitForIdle();
     assert.deepEqual(errors, []);
     const branch = session.sessionManager.getBranch();
-    const results = calls.map((call) => {
+    const results = turns.flat().map((call) => {
       const entry = branch.find((entry) => entry.type === "message"
         && entry.message.role === "toolResult" && entry.message.toolCallId === call.id);
       assert(entry?.type === "message" && entry.message.role === "toolResult");
       assert.equal(entry.message.isError, expectError, contentText(entry.message.content));
       return { entryId: entry.id, text: contentText(entry.message.content), details: entry.message.details };
     });
-    return { ...results[0]!, results, contexts };
+    return { ...results[0]!, results, contexts, requests };
   };
   return {
     start, prompt,
+    setPromptSection: (text: string) => { promptSection = text; },
     createManager: () => SessionManager.create(cwd, join(root, "sessions")),
     close: () => { session?.dispose(); session = undefined; },
     cleanup: async () => { session?.dispose(); await rm(root, { recursive: true, force: true }); },
@@ -249,16 +265,38 @@ test("native sibling results preserve reference commits and exact branch boundar
 });
 
 test("native sibling todo IDs survive delayed execution and reload", { timeout: 30_000 }, async () => {
-  const f = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const gate = Promise.withResolvers<void>();
+  let delayedCalls = 0;
+  let delayedCallId: string | undefined;
+  const f = await fixture(undefined, async (event) => {
+    if (event.toolName === "todo_list" && event.input.text === "Delayed first") {
+      delayedCalls++;
+      delayedCallId = event.toolCallId;
+      entered.resolve();
+      await gate.promise;
+    }
+  });
   try {
     const session = await f.start(f.createManager());
-    session.agent.subscribe(async (event) => {
-      const prepared = event as { type: string; toolName?: string; args?: { text?: string } };
-      if (prepared.type === "tool_execution_prepared" && prepared.toolName === "todo_list" && prepared.args?.text === "Delayed first") {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    });
-    await f.prompt([{ action: "add", text: "Delayed first" }, { action: "add", text: "Fast second" }]);
+    const execution = f.prompt([{ action: "add", text: "Delayed first" }, { action: "add", text: "Fast second" }]);
+    try {
+      assert.equal(await Promise.race([
+        entered.promise.then(() => "entered"), execution.then(() => "finished"),
+      ]), "entered", "the delay must be entered before execution finishes");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(delayedCalls, 1);
+      assert(!session.sessionManager.getBranch().some((entry) => entry.type === "message"
+        && entry.message.role === "toolResult" && entry.message.toolCallId === delayedCallId),
+      "the delayed tool must not produce a result while its gate is held");
+    } finally {
+      gate.resolve();
+      await execution;
+    }
+    assert.equal(delayedCalls, 1, "the delayed callback must run exactly once");
+    const results = (await execution).results;
+    assert.match(results[0]!.text, /Added #1: Delayed first/);
+    assert.match(results[1]!.text, /Added #2: Fast second/);
     const beforeReload = (await f.prompt({ action: "list" })).text;
     assert.match(beforeReload, /Delayed first/);
     assert.match(beforeReload, /Fast second/);
@@ -267,24 +305,18 @@ test("native sibling todo IDs survive delayed execution and reload", { timeout: 
   } finally { await f.cleanup(); }
 });
 
-type WindowSession = AgentSession & { newContext?: (options?: { handoff?: string }) => void };
-const hasWindows = typeof (AgentSession.prototype as WindowSession).newContext === "function";
-if (process.env.PI_COMPAT_HOST === "fork" && !hasWindows) {
-  throw new Error("Fork qualification requires native context windows; tests must not skip");
-}
-
-test("native fresh windows inject the pre-window todo snapshot without persisting duplicates", {
-  timeout: 30_000, skip: !hasWindows && "Selected host does not provide native context windows",
-}, async () => {
+test("native retain-none compaction recovers todos on the next request and reload", { timeout: 30_000 }, async (t) => {
   const f = await fixture();
   try {
-    const session = await f.start(f.createManager()) as WindowSession;
+    const session = await f.start(f.createManager());
     await f.prompt({ action: "batch", operations: [
       { action: "add", text: "ALPHA window task", status: "paused", ref: "parent" },
       { action: "add", text: "BETA window child", status: "in_progress", parentId: "parent" },
     ] });
-    session.newContext!({ handoff: "Continue with a fresh context" });
-    assert(session.sessionManager.getBranch().some((entry) => (entry as { type: string }).type === "context_window"));
+    session.sessionManager.appendCompaction("", null, 0);
+    session.refreshContext();
+    assert(!JSON.stringify(session.sessionManager.buildSessionContext().messages).includes("ALPHA window task"),
+      "Retain-none removes the prior tool results from provider context");
     const result = await f.prompt({ action: "list" });
     assert.match(result.text, /ALPHA window task/);
     for (const messages of result.contexts) {
@@ -295,8 +327,66 @@ test("native fresh windows inject the pre-window todo snapshot without persistin
       assert.match(JSON.stringify(snapshots), /1 active, 0 pending, 1 paused/);
     }
     assert.equal(session.sessionManager.getBranch().filter((entry) =>
-      entry.type === "custom_message" && entry.customType === "todo-list-context").length, 0);
+      entry.type === "custom_message" && entry.customType === "todo-list-context").length, 0,
+    "retain-none recovery is request-only, not an extra persistent entry");
     await session.reload();
     assert.match((await f.prompt({ action: "list" })).text, /ALPHA window task/);
   } finally { await f.cleanup(); }
+
+  for (const order of ["before", "after"] as const) await t.test(`in-run producer loaded ${order} Todo`, async () => {
+    const live = await fixture(undefined, undefined, order);
+    try {
+      const session = await live.start(live.createManager());
+      await live.prompt({ action: "batch", operations: [
+        { action: "add", text: "OLD boundary task", status: "paused", ref: "parent" },
+        { action: "add", text: "BETA boundary child", status: "in_progress", parentId: "parent" },
+        ...Array.from({ length: 6 }, (_, index) => ({ action: "add", text: `Extra paused ${index}`, status: "paused" })),
+      ] });
+      const result = await live.prompt({ action: "update", id: 1, text: "CURRENT boundary task" }, false, 0,
+        { action: "update", id: 2, text: "AFTER boundary child" });
+      assert.equal(result.requests.length, 3, "rollover must not add a provider round");
+      const compactions = session.sessionManager.getBranch().filter((entry) => entry.type === "compaction");
+      assert.equal(compactions.length, 1);
+      assert.equal(compactions[0]!.summary, "");
+      assert.equal(compactions[0]!.firstKeptEntryId, compactions[0]!.id);
+      const nextRequest = result.contexts[1]!;
+      assert(!nextRequest.some((message) => message.role === "toolResult"), "old tool history must be discarded");
+      assert.doesNotMatch(JSON.stringify(result.requests[1]), /OLD boundary task/);
+      assert.match(JSON.stringify(result.requests[1]), /\[TODO LIST - recovery snapshot\]/);
+      assert.match(JSON.stringify(result.requests[1]), /CURRENT boundary task/);
+      const snapshots = nextRequest.filter((message) => message.role === "custom" && message.customType === "todo-list-context");
+      assert.equal(snapshots.length, 1, "the first continued request must receive recovery");
+      assert.match(JSON.stringify(snapshots), /CURRENT boundary task/);
+      assert.match(JSON.stringify(snapshots), /BETA boundary child/);
+      assert.match(JSON.stringify(snapshots), /1 active, 0 pending, 7 paused/);
+      assert.doesNotMatch(JSON.stringify(snapshots), /Extra paused 4|Extra paused 5|AFTER boundary child/);
+      assert.deepEqual(result.requests[2]!.slice(0, result.requests[1]!.length), result.requests[1],
+        "later mutations must append results without rewriting the recovery prefix");
+      for (const messages of result.contexts.slice(1)) {
+        assert.equal(messages.filter((message) => message.role === "custom" && message.customType === "todo-list-context").length, 1);
+      }
+      const initialHead = result.requests[1]![0]!;
+      assert.equal(initialHead.role, "system", "the initial head must remain first");
+      live.setPromptSection("Incremental prompt after rollover");
+      const listed = await live.prompt({ action: "list", id: 2 });
+      assert.equal(listed.text, "#2 AFTER boundary child\nStatus: in progress\nParent: #1");
+      assert.deepEqual(listed.requests[0]!.slice(0, result.requests[2]!.length), result.requests[2],
+        "an incremental prompt update must preserve the full submitted prefix");
+      const systemUpdates = listed.requests[0]!.filter((message) => message.role === "system");
+      assert.equal(systemUpdates.length, 2, "the prompt change must append, not fold into the initial head");
+      assert.deepEqual(systemUpdates[0], initialHead);
+      assert.match(JSON.stringify(systemUpdates[1]), /Incremental prompt after rollover/);
+      assert.deepEqual(listed.requests[1]!.slice(0, listed.requests[0]!.length), listed.requests[0],
+        "a later mutation request must retain the incremental system update");
+      await session.reload();
+      const reloaded = await live.prompt({ action: "list", id: 1 });
+      assert.equal(reloaded.text, "#1 CURRENT boundary task\nStatus: paused");
+      assert.deepEqual(reloaded.requests[0]!.slice(0, listed.requests[1]!.length), listed.requests[1],
+        "reload must preserve the initial head and appended system update");
+      assert.deepEqual(reloaded.requests[0]!.filter((message) => message.role === "system"), systemUpdates);
+      assert.equal(session.sessionManager.getBranch().filter((entry) =>
+        entry.type === "custom_message" && entry.customType === "todo-list-context").length, 0,
+      "request-only recovery must not accumulate persistent snapshots");
+    } finally { await live.cleanup(); }
+  });
 });
