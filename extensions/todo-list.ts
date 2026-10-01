@@ -219,6 +219,26 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   let recoveryNeeded = false;
   let widgetVisible = process.env.PI_TODO_WIDGET?.trim().toLowerCase() === "show";
   let boundaryContext: { id: string; message: ContextWithSystemEvent["messages"][number] | null } | undefined;
+  let observedLeaf: string | null = null;
+  let compaction: BranchEntry | undefined;
+
+  const latestCompaction = (ctx: ExtensionContext): BranchEntry | undefined => {
+    const leaf = ctx.sessionManager.getLeafId();
+    let id = leaf;
+    while (id && id !== observedLeaf) {
+      const entry = ctx.sessionManager.getEntry(id);
+      if (!entry) break;
+      if (entry.type === "compaction") {
+        compaction = entry;
+        observedLeaf = leaf;
+        return compaction;
+      }
+      id = entry.parentId;
+    }
+    if (id !== observedLeaf) compaction = undefined; // Navigation outside the indexed ancestry.
+    observedLeaf = leaf;
+    return compaction;
+  };
 
   const todoContextMessage = (snapshot = state) => ({
     customType: TODO_CONTEXT_TYPE,
@@ -268,6 +288,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
 
   const rehydrate = (ctx: ExtensionContext): void => {
     boundaryContext = undefined;
+    observedLeaf = null;
+    compaction = undefined;
     const restored = restore(ctx.sessionManager.getBranch());
     state = restored.state;
     recoveryNeeded = restored.recoveryNeeded;
@@ -290,11 +312,11 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       && typeof (message.details as { windowId?: unknown }).windowId === "string"
     );
     if (markerIndex < 0) {
-      const branch = ctx.sessionManager.getBranch();
-      const index = branch.findLastIndex((entry) => entry.type === "compaction");
-      const boundary = branch[index];
+      const boundary = latestCompaction(ctx);
       if (boundary?.type !== "compaction" || boundary.firstKeptEntryId !== boundary.id) return;
       if (boundaryContext?.id !== boundary.id) {
+        const branch = ctx.sessionManager.getBranch();
+        const index = branch.findIndex(entry => entry.id === boundary.id);
         // Freeze the state at rollover; later results extend rather than rewrite this prefix.
         const snapshot = restore(branch, index).state;
         boundaryContext = {

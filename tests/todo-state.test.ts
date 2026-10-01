@@ -380,7 +380,15 @@ function createExtensionHarness(sessionManager?: SessionManager) {
       setStatus(_key: string, text: string | undefined) { statusUpdates.push(text); },
       notify(message: string) { notifications.push(message); },
     },
-    sessionManager: sessionManager ?? { getBranch: () => branch },
+    sessionManager: sessionManager ?? {
+      getBranch: () => branch,
+      getLeafId: () => branch.length ? branch.at(-1)?.id ?? `fixture-${branch.length}` : null,
+      getEntry: (id: string) => {
+        const index = branch.findIndex((entry, i) => (entry.id ?? `fixture-${i + 1}`) === id);
+        if (index < 0) return undefined;
+        return { ...branch[index], id, parentId: index > 0 ? branch[index - 1]?.id ?? `fixture-${index}` : null };
+      },
+    },
   };
   let tool: Tool | undefined;
   let command: Command | undefined;
@@ -855,6 +863,44 @@ test("native context injection has no initial-window or never-used-list tax", as
     display: false,
     timestamp: 1,
   }]);
+});
+
+test("ordinary and retain-none requests reuse branch facts across small and long histories", async () => {
+  for (const size of [10, 43000]) {
+    const sm = SessionManager.inMemory();
+    for (let i = 0; i < size; i++) sm.appendMessage({ role: "user", content: "archived", timestamp: i });
+    const anchor = sm.getLeafId()!;
+    const h = createExtensionHarness(sm);
+    h.startSession([]);
+    await h.execute({ action: "add", text: "Boundary task" });
+    const getEntry = sm.getEntry.bind(sm);
+    const getBranch = sm.getBranch.bind(sm);
+    let reads = 0;
+    let branches = 0;
+    sm.getEntry = id => { reads++; return getEntry(id); };
+    sm.getBranch = (...args) => { branches++; return getBranch(...args); };
+    const messages = [{ role: "system", content: "head", timestamp: 0 }];
+    const request = () => h.emit("context_with_system", { messages });
+    assert.equal(request(), undefined, "ordinary requests add no recovery message");
+    assert.equal(branches, 0);
+    assert.equal(reads, size + 1);
+    reads = 0;
+    request(); request();
+    assert.equal(reads, 0, "absence of compaction is cached");
+    sm.appendCompaction("", null, 100);
+    const first = request() as { messages: Array<{ role: string; content: string }> };
+    assert.equal(branches, 1, "one complete replay freezes state at the new boundary");
+    assert.equal(first.messages[0]?.role, "system");
+    assert.match(first.messages[1]?.content ?? "", /Boundary task/);
+    branches = 0; reads = 0;
+    assert.deepEqual(request(), first);
+    assert.equal(branches, 0); assert.equal(reads, 0);
+    await h.execute({ action: "update", id: 1, text: "Later task" });
+    assert.deepEqual(request(), first, "later results do not rewrite the cacheable recovery prefix");
+    assert.equal(reads, 1, "only the appended result is inspected");
+    sm.branch(anchor);
+    assert.equal(request(), undefined, "navigation does not inherit the previous branch boundary");
+  }
 });
 
 test("native context injects the boundary-time todo snapshot immediately after its marker", async () => {

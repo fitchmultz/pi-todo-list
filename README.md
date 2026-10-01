@@ -13,13 +13,13 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 
 ## Requirements
 
-- Pi 0.87.1 or later (official releases and the maintained fork)
+- Pi 1.0.0 or later (official releases and the maintained fork)
 - Node.js 24 or later
 
 ## Install
 
 ```bash
-pi install git:github.com/fitchmultz/pi-todo-list@v0.9.0
+pi install git:github.com/fitchmultz/pi-todo-list@v0.10.0
 ```
 
 For local development:
@@ -75,6 +75,8 @@ When using notes, maintain one brief current summary: goal, current state, next 
 
 The tool definition and system-prompt guidance are static. Mutations return only the change and status counts. Ordinary requests add no todo context. After compaction, including retain-none rollover, the extension injects one recovery summary with at most five active, five pending, and five paused titles for the retry or next request, including automatic compaction between tool turns. The snapshot is labeled as a recovery snapshot: later tool results carry current state without rewriting the provider-cacheable prefix.
 
+Ordinary requests cache the latest compaction (including its absence), inspecting only new ancestry entries. A new retain-none boundary replays the selected branch once to freeze its snapshot. Session/tree changes reset this lookup; no independent state journal or arbitrary history cap is introduced.
+
 Retain-none recovery reaches the first continued request in the same run. It is a request-only snapshot of the list at that boundary, not another journal entry, and stays byte-stable across later mutations and reloads.
 
 ## State behavior
@@ -91,7 +93,7 @@ npm run check:compat
 pi -e ./extensions/todo-list.ts --list-models
 ```
 
-The development Pi cohort is official `0.99.1`.
+The development Pi cohort is official `1.0.0` (all eight Pi packages and host TypeBox `1.3.27`). No fork-only API is required.
 
 `check:compat` runs the state suite, native SDK lifecycle tests, typechecking, and a
 pack dry-run against the installed host. Native tests script only model output: Pi
