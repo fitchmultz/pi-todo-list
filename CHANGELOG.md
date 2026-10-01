@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Require Pi 1.0.0 and qualify the exact native cohort with TypeBox 1.3.27.
+- Cache compaction lookup across request preparation and reconcile appended entries; freeze recovery with one complete replay per new boundary. Keep the sequential reducer, ordinary result placement, branch recovery, and widgets unchanged.
+
 ### Fixed
 
 - Recover todos on the first continued request after an in-run retain-none rollover. Retain-none recovery is a request-only boundary snapshot that stays stable across later mutations and reloads.
