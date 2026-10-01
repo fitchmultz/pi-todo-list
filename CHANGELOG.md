@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-01
+
 ### Changed
 
 - Require Pi 1.0.0 and qualify the exact native cohort with TypeBox 1.3.27.
