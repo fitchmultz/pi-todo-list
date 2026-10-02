@@ -93,7 +93,7 @@ npm run check:compat
 pi -e ./extensions/todo-list.ts --list-models
 ```
 
-The development Pi cohort is official `1.0.0` (all eight Pi packages and host TypeBox `1.3.27`). No fork-only API is required.
+The development Pi cohort is official `1.0.0` (all eight Pi packages and host TypeBox `1.3.27`); the extension's development schema dependency is TypeBox `1.3.34`. Host dependencies and runtime peers are unchanged. No fork-only API is required.
 
 `check:compat` runs the state suite, native SDK lifecycle tests, typechecking, and a
 pack dry-run against the installed host. Native tests script only model output: Pi
