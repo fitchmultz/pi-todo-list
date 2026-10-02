@@ -1,10 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.1] - 2026-10-02
+
+### Fixed
+
+- Require observed successful verification before marking work completed, never completion in the verifying tool batch. A separate final completion call is appropriate when needed; failed or unverified work stays open.
 
 ### Changed
 
-- Batch todo updates with related tool calls when their status is already known, while requiring observed successful verification before completion, including a separate final completion call when needed.
+- Batch todo updates with related tool calls when their status is already known, including adding or starting work before its first work call.
 
 ## [0.10.0] - 2026-10-01
 
