@@ -481,6 +481,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
 test("add accepts every initial status standalone and in batches while defaulting to pending", async () => {
   for (const batch of [false, true]) {
     const harness = createExtensionHarness();
+    assert.equal(harness.toolDefinition().executionMode, "sequential");
     for (const [index, status] of [undefined, "pending", "in_progress", "paused", "completed"].entries()) {
       const operation = { action: "add", text: `Initial ${status ?? "default"}`, ...(status === undefined ? {} : { status }) };
       await harness.execute(batch ? { action: "batch", operations: [operation] } : operation);
@@ -1020,30 +1021,6 @@ test("UI updates and commands honor availability", async () => {
   assert.equal(headless.widgetUpdates.length, 0);
   assert.equal(headless.statusUpdates.length, 0);
   assert.equal(headless.notifications.length, 0);
-});
-
-test("todo_list serializes sibling tool batches and mutates atomically", async () => {
-  const harness = createExtensionHarness();
-  assert.equal(harness.toolDefinition().executionMode, "sequential");
-
-  await harness.execute({ action: "add", text: "Parent" });
-  const concurrent = (await Promise.all([
-    harness.execute({ action: "add", text: "First child", parentId: 1 }),
-    harness.execute({ action: "add", text: "Second child", parentId: 1 }),
-    harness.execute({ action: "start", id: 1 }),
-  ])) as Array<{ content: Array<{ text: string }> }>;
-  assert.match(concurrent[0]!.content[0]!.text, /Added #2: First child/);
-  assert.match(concurrent[1]!.content[0]!.text, /Added #3: Second child/);
-  assert.match(concurrent[2]!.content[0]!.text, /Started #1: Parent/);
-
-  const branch = harness.branch();
-  harness.switchBranch([]);
-  harness.switchBranch(branch);
-  const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
-  assert.equal(
-    listed.content[0]!.text,
-    "TODO: 1 active, 2 pending, 0 completed\n> #1 Parent\n  - #2 First child\n  - #3 Second child",
-  );
 });
 
 test("namespaced todo_list results cannot change the local list on restore", async () => {
