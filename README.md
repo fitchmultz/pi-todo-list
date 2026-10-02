@@ -34,7 +34,7 @@ For a one-off run:
 pi -e ./extensions/todo-list.ts
 ```
 
-Then ask the agent to track the work. It will list todos when starting or resuming, mark items in progress, and leave nothing open when it reports the work finished. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
+Then ask the agent to track the work. It will list todos when starting or resuming and add or start items before their first work call in the same tool batch. Updates can accompany other tool calls when their status is already known, but completion must wait until the agent has observed successful verification from an earlier batch. After the final check, a separate completion call is appropriate if no other work remains; failed or unverified work stays open. It leaves nothing open when it reports the work finished. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
 
 `list` without an `id` returns up to 100 open items and counts the completed ones in its header, matching the widget and the post-compaction summary. Use its zero-based `offset` and optional `limit` to continue through larger lists.
 

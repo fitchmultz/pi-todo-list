@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Batch todo updates with related tool calls when their status is already known, while requiring observed successful verification before completion, including a separate final completion call when needed.
+
 ## [0.10.0] - 2026-10-01
 
 ### Changed
