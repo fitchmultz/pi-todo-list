@@ -363,6 +363,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
   let hasUI = true;
   const widgetUpdates: Array<string[] | undefined> = [];
   let widgetFailure: Error | undefined;
+  let appendFailure = false;
   const statusUpdates: Array<string | undefined> = [];
   const notifications: string[] = [];
   const ctx = {
@@ -403,7 +404,15 @@ function createExtensionHarness(sessionManager?: SessionManager) {
     sendMessage: (message, options) => {
       sent.push({ message: message as (typeof sent)[number]["message"], options });
     },
-  } satisfies Pick<ExtensionAPI, "on" | "registerTool" | "registerCommand" | "sendMessage">;
+    appendEntry: (customType, data) => {
+      if (appendFailure) {
+        appendFailure = false;
+        throw new Error("journal append failed");
+      }
+      if (sessionManager) sessionManager.appendCustomEntry(customType, data);
+      else branch.push({ type: "custom", customType, data });
+    },
+  } satisfies Pick<ExtensionAPI, "on" | "registerTool" | "registerCommand" | "sendMessage" | "appendEntry">;
   todoListExtension(api as unknown as ExtensionAPI);
 
   const emit = (event: string, payload: Record<string, unknown>) => {
@@ -425,6 +434,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
     },
     setHasUI(value: boolean) { hasUI = value; },
     failNextWidgetUpdate() { widgetFailure = new Error("widget render failed"); },
+    failNextAppend() { appendFailure = true; },
     async runCommand(args: string) {
       assert.ok(command);
       await command.handler(args, ctx);
@@ -453,8 +463,9 @@ function createExtensionHarness(sessionManager?: SessionManager) {
     async execute(params: Record<string, unknown>, tolerateRejection = false) {
       assert.ok(tool);
       let result: unknown;
+      const toolCallId = "test-call";
       try {
-        result = await tool.execute("test-call", params, undefined, undefined, ctx);
+        result = await tool.execute(toolCallId, params, undefined, undefined, ctx);
       } catch (error) {
         if (!tolerateRejection) throw error;
         branch.push({ type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } });
@@ -463,7 +474,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
       const returned = result as { content: Array<{ type: "text"; text: string }>; details?: ToolResultMessage["details"] };
       const message = {
         role: "toolResult" as const,
-        toolCallId: "test-call",
+        toolCallId,
         toolName: "todo_list",
         content: returned.content,
         details: returned.details,
@@ -884,7 +895,7 @@ test("ordinary and retain-none requests reuse branch facts across small and long
     const request = () => h.emit("context_with_system", { messages });
     assert.equal(request(), undefined, "ordinary requests add no recovery message");
     assert.equal(branches, 0);
-    assert.equal(reads, size + 1);
+    assert.equal(reads, size + 2);
     reads = 0;
     request(); request();
     assert.equal(reads, 0, "absence of compaction is cached");
@@ -898,7 +909,7 @@ test("ordinary and retain-none requests reuse branch facts across small and long
     assert.equal(branches, 0); assert.equal(reads, 0);
     await h.execute({ action: "update", id: 1, text: "Later task" });
     assert.deepEqual(request(), first, "later results do not rewrite the cacheable recovery prefix");
-    assert.equal(reads, 1, "only the appended result is inspected");
+    assert.equal(reads, 2, "only the appended commit and result are inspected");
     sm.branch(anchor);
     assert.equal(request(), undefined, "navigation does not inherit the previous branch boundary");
   }
@@ -1046,11 +1057,13 @@ test("namespaced todo_list results cannot change the local list on restore", asy
   }
 });
 
-test("committed mutation details survive a downstream error flag", async () => {
-  const source = createExtensionHarness();
-  await source.execute({ action: "add", text: "Committed before postprocessing" });
-  const branch = source.branch();
-  (branch[0]!.message as Record<string, unknown>).isError = true;
+test("committed mutations survive downstream result changes", async () => {
+  const manager = SessionManager.inMemory();
+  const source = createExtensionHarness(manager);
+  const result = await source.execute({ action: "add", text: "Committed before postprocessing" });
+  (result!.details as { operations: Array<{ text: string }> }).operations[0]!.text = "Altered presentation";
+  const branch: Array<Record<string, unknown>> = JSON.parse(JSON.stringify(manager.getBranch()));
+  (branch.find(entry => entry.type === "message")!.message as Record<string, unknown>).isError = true;
   branch.push(
     { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } },
     { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true, details: {} } },
@@ -1101,6 +1114,24 @@ test("a widget failure cannot discard a persisted mutation", async () => {
   harness.switchBranch(branch);
   const listed = (await harness.execute({ action: "list" })) as { content: Array<{ text: string }> };
   assert.match(listed.content[0]!.text, /#1 Survives a render failure/);
+});
+
+test("a precommit append rejection rolls back mutations and does not consume IDs", async () => {
+  const manager = SessionManager.inMemory();
+  const harness = createExtensionHarness(manager);
+  await harness.execute({ action: "add", text: "Retained task", status: "paused", link: "/retained.md" });
+  for (const params of [
+    { action: "add", text: "Rejected addition" },
+    { action: "batch", operations: [{ action: "complete", id: 1 }, { action: "add", text: "Rejected batch" }] },
+  ]) {
+    const before = manager.getBranch();
+    harness.failNextAppend();
+    await assert.rejects(harness.execute(params), /journal append failed/);
+    assert.deepEqual(manager.getBranch(), before);
+    assert.equal((await harness.execute({ action: "list", id: 1 }))?.content[0]?.text,
+      "#1 Retained task\nStatus: paused\nDetails: /retained.md");
+  }
+  assert.match((await harness.execute({ action: "add", text: "Next task" }))?.content[0]?.text ?? "", /Added #2: Next task/);
 });
 
 test("/todos all shows the completed history the agent no longer pays for", async () => {
@@ -1198,13 +1229,22 @@ test("restore stops at conflicting and unknown persisted detail shapes", async (
     { version: 4, state: { nextId: 1, items: [] }, operations: [{ action: "add", text: "Conflicting recovery" }] },
     { version: 99, operations: [{ action: "add", text: "Unknown version" }] },
   ];
-  for (const details of corruptDetails) {
+  const corruptEntries: Array<Record<string, unknown>> = corruptDetails.flatMap(details => [
+    { type: "message", message: { role: "toolResult", toolName: "todo_list", details } },
+    { type: "custom", customType: "todo-list-state", data: { toolCallId: "corrupt", details } },
+  ]);
+  for (const data of [
+    null,
+    { toolCallId: 123, details: { version: 7, read: "list" } },
+    { toolCallId: "corrupt", details: { version: 7, read: "list" }, unexpected: true },
+  ]) corruptEntries.push({ type: "custom", customType: "todo-list-state", data });
+  for (const corruptEntry of corruptEntries) {
     const harness = createExtensionHarness();
     harness.switchBranch([
       { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "Before gap" }] } } },
       { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } },
       { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After harmless error" }] } } },
-      { type: "message", message: { role: "toolResult", toolName: "todo_list", details } },
+      corruptEntry,
       { type: "message", message: { role: "toolResult", toolName: "todo_list", details: { version: 3, operations: [{ action: "add", text: "After gap" }] } } },
     ]);
 
