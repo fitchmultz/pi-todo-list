@@ -107,5 +107,5 @@ CI uses the shared [Pi compatibility automation](https://github.com/fitchmultz/.
 on Node 24 to resolve the latest stable official Pi version and maintained fork SHA
 once per run, then qualify those exact targets. The supported development Pi floor
 is qualified separately, not used as the latest official target. Each qualification
-runs `check:compat`; fresh Git and npm production consumers must also load through
-the selected host's CLI without extension errors.
+runs `check:compat`, including a pack dry-run; a fresh production-only checkout must
+also load through the selected host's CLI without extension errors.
