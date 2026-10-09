@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdirSync, renameSync, rmdirSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,11 +8,11 @@ import { fileURLToPath } from "node:url";
 import { contentText, createAssistantMessageEventStream, type AssistantMessage, type ToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import {
   AgentSession, createAgentSession, createCodemodeExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
-  type ContextWithSystemEvent, type ToolCallEvent,
+  type ContextWithSystemEvent, type ToolCallEvent, type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 
 // Script only model output. Pi owns loading, tool execution, persistence and event delivery.
-async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolCallEvent) => Promise<void>, producerOrder?: "before" | "after", codemode = false) {
+async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolCallEvent) => Promise<void>, producerOrder?: "before" | "after", codemode = false, afterToolCall?: (event: ToolResultEvent) => void) {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-native-"));
   const cwd = join(root, "project");
   const agentDir = join(root, "agent");
@@ -50,6 +51,7 @@ async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolC
           if (promptSection) event.systemPromptOptions.sections.fixture = promptSection;
         });
         pi.on("tool_result", (event) => {
+          afterToolCall?.(event);
           if (resultErrorTitle && event.toolName === "todo_list"
             && event.input.action === "add" && event.input.text === resultErrorTitle) {
             return { isError: true };
@@ -74,10 +76,10 @@ async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolC
     assert(session.extensionRunner.getCommand("todos"));
     return session;
   };
-  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false, inputTokens = 0, nextArgs?: ToolCall["arguments"], toolName = "todo_list") => {
+  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false, inputTokens = 0, nextArgs?: ToolCall["arguments"], toolName = "todo_list", forcedCallId?: string) => {
     assert(session);
     const calls: ToolCall[] = (Array.isArray(args) ? args : [args]).map((arguments_) => ({
-      type: "toolCall", id: `todo-${++callId}`, name: toolName, arguments: arguments_,
+      type: "toolCall", id: forcedCallId ?? `todo-${++callId}`, name: toolName, arguments: arguments_,
     }));
     const turns = [calls];
     if (nextArgs) turns.push([{ type: "toolCall", id: `todo-${++callId}`, name: "todo_list", arguments: nextArgs }]);
@@ -102,7 +104,7 @@ async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolC
     assert.deepEqual(errors, []);
     const branch = session.sessionManager.getBranch();
     const results = turns.flat().map((call) => {
-      const entry = branch.find((entry) => entry.type === "message"
+      const entry = branch.findLast((entry) => entry.type === "message"
         && entry.message.role === "toolResult" && entry.message.toolCallId === call.id);
       assert(entry?.type === "message" && entry.message.role === "toolResult");
       assert.equal(entry.message.isError, expectError, contentText(entry.message.content));
@@ -112,13 +114,76 @@ async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolC
   };
   return {
     start, prompt,
-    script: (code: string, expectError = false) => prompt({ code }, expectError, 0, undefined, "codemode"),
+    script: (code: string, expectError = false, id?: string) => prompt({ code }, expectError, 0, undefined, "codemode", id),
     setPromptSection: (text: string) => { promptSection = text; },
     createManager: () => SessionManager.create(cwd, join(root, "sessions")),
     close: () => { session?.dispose(); session = undefined; },
     cleanup: async () => { session?.dispose(); await rm(root, { recursive: true, force: true }); },
   };
 }
+
+test("native tool IDs can repeat or be empty without losing direct or nested commits", { timeout: 30_000 }, async (t) => {
+  for (const id of ["reused", ""]) await t.test(id || "empty", async () => {
+    const f = await fixture(undefined, undefined, undefined, true);
+    try {
+      let session = await f.start(f.createManager());
+      await f.prompt({ action: "add", text: "First" }, false, 0, undefined, "todo_list", id);
+      await f.prompt({ action: "add", text: "Second" }, false, 0, undefined, "todo_list", id);
+      await f.prompt({ action: "complete", id: 1 }, false, 0, undefined, "todo_list", id);
+      const direct = "TODO: 0 active, 1 pending, 1 completed\n- #2 Second\n… 1 completed not shown";
+      assert.equal((await f.prompt({ action: "list" })).text, direct);
+      await session.reload();
+      assert.equal((await f.prompt({ action: "list" })).text, direct);
+      await f.script('return await tools.todo_list({action:"add",text:"Nested third"})', false, id);
+      await f.script('return await tools.todo_list({action:"add",text:"Nested fourth"})', false, id);
+      const expected = "TODO: 0 active, 3 pending, 1 completed\n- #2 Second\n- #3 Nested third\n- #4 Nested fourth\n… 1 completed not shown";
+      await session.reload();
+      assert.equal((await f.prompt({ action: "list" })).text, expected);
+      const file = session.sessionFile;
+      assert(file);
+      f.close();
+      session = await f.start(SessionManager.open(file));
+      assert.equal((await f.prompt({ action: "list" })).text, expected);
+    } finally { await f.cleanup(); }
+  });
+});
+
+test("native persist failure preserves the original error and current branch projection across reload", { timeout: 30_000 }, async () => {
+  let session: AgentSession | undefined;
+  let faultFile: string | undefined;
+  const f = await fixture(undefined, async event => {
+    if (event.toolName === "todo_list" && event.input.text === "Persist failure") {
+      assert(session?.sessionFile);
+      faultFile = session.sessionFile;
+      renameSync(faultFile, `${faultFile}.saved`);
+      mkdirSync(faultFile);
+    }
+  }, undefined, false, event => {
+    if (event.toolName === "todo_list" && event.input.text === "Persist failure") {
+      assert(faultFile);
+      rmdirSync(faultFile);
+      renameSync(`${faultFile}.saved`, faultFile);
+      faultFile = undefined;
+    }
+  });
+  try {
+    session = await f.start(f.createManager());
+    await f.prompt({ action: "add", text: "Retained" });
+    const failure = await f.prompt({ action: "add", text: "Persist failure" }, true);
+    assert.match(failure.text, /EISDIR/);
+    const expected = "TODO: 0 active, 2 pending, 0 completed\n- #1 Retained\n- #2 Persist failure";
+    assert.equal((await f.prompt({ action: "list" })).text, expected);
+    await session.reload();
+    assert.equal((await f.prompt({ action: "list" })).text, expected);
+    assert.match((await f.prompt({ action: "add", text: "Next ID" })).text, /Added #3: Next ID/);
+  } finally {
+    if (faultFile) {
+      rmdirSync(faultFile);
+      renameSync(`${faultFile}.saved`, faultFile);
+    }
+    await f.cleanup();
+  }
+});
 
 test("native nested Todo commits survive script failure, reload, tree navigation and disk resume", { timeout: 30_000 }, async () => {
   const f = await fixture(undefined, undefined, undefined, true);

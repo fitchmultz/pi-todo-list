@@ -350,7 +350,6 @@ test("list pages and compaction context stay bounded", () => {
   assert.doesNotMatch(context, /https:|> #6 |- #36 |⏸ #106 /);
 });
 
-let callId = 0;
 function createExtensionHarness(sessionManager?: SessionManager) {
   type Handler = (...args: any[]) => any;
   type Tool = { execute: (...args: any[]) => Promise<unknown>; executionMode?: string };
@@ -411,7 +410,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
         throw new Error("journal append failed");
       }
       if (sessionManager) sessionManager.appendCustomEntry(customType, data);
-      else branch.push({ type: "custom", customType, data: structuredClone(data) });
+      else branch.push({ type: "custom", customType, data });
     },
   } satisfies Pick<ExtensionAPI, "on" | "registerTool" | "registerCommand" | "sendMessage" | "appendEntry">;
   todoListExtension(api as unknown as ExtensionAPI);
@@ -464,7 +463,7 @@ function createExtensionHarness(sessionManager?: SessionManager) {
     async execute(params: Record<string, unknown>, tolerateRejection = false) {
       assert.ok(tool);
       let result: unknown;
-      const toolCallId = `test-call-${++callId}`;
+      const toolCallId = "test-call";
       try {
         result = await tool.execute(toolCallId, params, undefined, undefined, ctx);
       } catch (error) {
@@ -1059,10 +1058,11 @@ test("namespaced todo_list results cannot change the local list on restore", asy
 });
 
 test("committed mutations survive downstream result changes", async () => {
-  const source = createExtensionHarness();
+  const manager = SessionManager.inMemory();
+  const source = createExtensionHarness(manager);
   const result = await source.execute({ action: "add", text: "Committed before postprocessing" });
   (result!.details as { operations: Array<{ text: string }> }).operations[0]!.text = "Altered presentation";
-  const branch = source.branch();
+  const branch: Array<Record<string, unknown>> = JSON.parse(JSON.stringify(manager.getBranch()));
   (branch.find(entry => entry.type === "message")!.message as Record<string, unknown>).isError = true;
   branch.push(
     { type: "message", message: { role: "toolResult", toolName: "todo_list", isError: true } },
@@ -1116,7 +1116,7 @@ test("a widget failure cannot discard a persisted mutation", async () => {
   assert.match(listed.content[0]!.text, /#1 Survives a render failure/);
 });
 
-test("a rejected journal append rolls back mutations and does not consume IDs", async () => {
+test("a precommit append rejection rolls back mutations and does not consume IDs", async () => {
   const manager = SessionManager.inMemory();
   const harness = createExtensionHarness(manager);
   await harness.execute({ action: "add", text: "Retained task", status: "paused", link: "/retained.md" });
@@ -1235,7 +1235,7 @@ test("restore stops at conflicting and unknown persisted detail shapes", async (
   ]);
   for (const data of [
     null,
-    { toolCallId: "", details: { version: 7, read: "list" } },
+    { toolCallId: 123, details: { version: 7, read: "list" } },
     { toolCallId: "corrupt", details: { version: 7, read: "list" }, unexpected: true },
   ]) corruptEntries.push({ type: "custom", customType: "todo-list-state", data });
   for (const corruptEntry of corruptEntries) {

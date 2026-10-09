@@ -5,7 +5,8 @@
 ### Fixed
 
 - Persist Todo mutations and recovery checkpoints through native custom entries so nested tool calls, including codemode scripts that fail after committing, survive reload and resume. Keep legacy tool-result replay, branch boundaries, compact logs, and fail-closed corruption recovery.
-- Roll back in-memory mutations when the journal append is rejected, without consuming IDs.
+- Preserve state and IDs for precommit append rejections; reconcile the current native branch after a persistence failure and keep reporting the original error, without claiming atomic disk writes.
+- Replay empty and reused tool-call IDs without dropping commits, pairing direct results only within their assistant turn.
 
 ## [0.10.1] - 2026-10-02
 

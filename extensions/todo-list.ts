@@ -87,18 +87,24 @@ const NOT_TODO_RESULT = Symbol("not-todo-result");
 const NO_TODO_CHANGE = Symbol("no-todo-change");
 type BranchEntry = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[number];
 
-function entryDetails(entry: BranchEntry, committedCalls: Set<string>): unknown {
+function entryDetails(entry: BranchEntry, pendingResults: Map<string, number>): unknown {
+  if (entry.type === "message" && entry.message.role === "assistant") pendingResults.clear();
   if (entry.type === "custom" && entry.customType === TODO_STATE_TYPE) {
     const data = entry.data as { toolCallId?: unknown; details?: unknown } | undefined;
     if (!data || typeof data !== "object" || !hasExactKeys(data, ["toolCallId", "details"])
-      || typeof data.toolCallId !== "string" || !data.toolCallId || committedCalls.has(data.toolCallId)) return undefined;
-    committedCalls.add(data.toolCallId);
+      || typeof data.toolCallId !== "string") return undefined;
+    pendingResults.set(data.toolCallId, (pendingResults.get(data.toolCallId) ?? 0) + 1);
     return data.details;
   }
   if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "todo_list") {
     if ("namespace" in entry.message && entry.message.namespace !== undefined) return NOT_TODO_RESULT;
     // The custom entry owns the commit; its transport result must not replay it twice.
-    if (committedCalls.has(entry.message.toolCallId)) return NO_TODO_CHANGE;
+    const pending = pendingResults.get(entry.message.toolCallId) ?? 0;
+    if (pending > 0) {
+      if (pending === 1) pendingResults.delete(entry.message.toolCallId);
+      else pendingResults.set(entry.message.toolCallId, pending - 1);
+      return NO_TODO_CHANGE;
+    }
     const { details, isError } = entry.message;
     // A result hook can mark a committed mutation as an error after execute returns.
     if (isError && !isSnapshot(details) && !isMutationLog(details) && !isReadMarker(details)) return NO_TODO_CHANGE;
@@ -179,8 +185,8 @@ function replayLog(state: TodoState, log: MutationDetails): void {
 }
 
 function restore(branch: BranchEntry[], endIndex = branch.length): { state: TodoState; recoveryNeeded: boolean } {
-  const committedCalls = new Set<string>();
-  const history = branch.slice(0, endIndex).map((entry) => entryDetails(entry, committedCalls));
+  const pendingResults = new Map<string, number>();
+  const history = branch.slice(0, endIndex).map((entry) => entryDetails(entry, pendingResults));
   let restored = emptyState();
   let checkpointIndex = -1;
   let restoreStopped = false;
@@ -397,7 +403,6 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     parameters: Params,
     executionMode: "sequential",
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
-      const previousLeaf = ctx.sessionManager.getLeafId();
       let message: string;
       let details: MutationDetails | ReadDetails | RecoveryDetails;
       if (params.status !== undefined && params.action !== "add") throw new Error("status is only supported for add");
@@ -426,7 +431,13 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         try {
           pi.appendEntry(TODO_STATE_TYPE, { toolCallId, details: structuredClone(details) });
         } catch (error) {
-          state = restore(previousLeaf ? ctx.sessionManager.getBranch(previousLeaf) : []).state;
+          // Native append may advance the branch before persistence fails.
+          const restored = restore(ctx.sessionManager.getBranch());
+          state = restored.state;
+          recoveryNeeded = restored.recoveryNeeded;
+          try {
+            updateWidget(ctx);
+          } catch {}
           throw error;
         }
       }
