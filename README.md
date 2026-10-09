@@ -104,6 +104,8 @@ all prior provider context, without requiring retired native-window APIs.
 Use a disposable HOME/agent directory and no provider credentials.
 
 CI uses the shared [Pi compatibility automation](https://github.com/fitchmultz/.github)
-on Node 24 to run `check:compat` against official Pi and the maintained fork. It checks
-out the fork's `main` branch and qualifies that exact checkout, recording its commit SHA. A fresh production-only checkout must also
-load through each host's CLI without extension errors.
+on Node 24 to resolve the latest stable official Pi version and maintained fork SHA
+once per run, then qualify those exact targets. The supported development Pi floor
+is qualified separately, not used as the latest official target. Each qualification
+runs `check:compat`; fresh Git and npm production consumers must also load through
+the selected host's CLI without extension errors.

@@ -17,7 +17,13 @@ env:
   PI_AUTOMATION_REF: 54c687228d840506555801b9db038373e697d901 # fix/npm12-qualification
 
 jobs:
+  resolve:
+    uses: fitchmultz/.github/.github/workflows/resolve-hosts.yml@54c687228d840506555801b9db038373e697d901 # fix/npm12-qualification
+    with:
+      automation-ref: 54c687228d840506555801b9db038373e697d901 # fix/npm12-qualification
+
   compatibility:
+    needs: resolve
     name: compatibility / compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -41,18 +47,17 @@ jobs:
         run: npm install --global "$(node -p 'require("./automation/package.json").packageManager')"
       - id: targets
         run: |
-          echo "official=$(node -p 'require("./extension/package.json").devDependencies["@earendil-works/pi-coding-agent"]')" >> "$GITHUB_OUTPUT"
+          echo "development-floor=$(node -p 'require("./extension/package.json").devDependencies["@earendil-works/pi-coding-agent"]')" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        id: fork
         with:
           repository: fitchmultz/pi
-          ref: main
+          ref: ${{ needs.resolve.outputs.fork-ref }}
           path: fork
           persist-credentials: false
-      - name: Build the current fork package
+      - name: Build the resolved fork package
         working-directory: fork
         env:
-          FORK_REF: ${{ steps.fork.outputs.commit }}
+          FORK_REF: ${{ needs.resolve.outputs.fork-ref }}
           PI_OFFLINE: '1'
           PI_TELEMETRY: '0'
         run: |
@@ -64,19 +69,28 @@ jobs:
           git diff --exit-code
       - name: Use the extension npm version
         run: npm install --global "$(node -p 'require("./extension/package.json").packageManager')"
-      - name: Qualify official Pi
+      - name: Qualify latest official Pi
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
           node automation/scripts/qualify.mjs --repo pi-todo-list
           --source "$GITHUB_WORKSPACE/extension"
-          --host official --target "${{ steps.targets.outputs.official }}"
+          --host official --target "${{ needs.resolve.outputs.official-version }}"
           --output "$RUNNER_TEMP/qualification-official"
       - name: Qualify maintained fork
         env:
-          PI_COMPAT_FORK_REF: ${{ steps.fork.outputs.commit }}
+          PI_COMPAT_FORK_REF: ${{ needs.resolve.outputs.fork-ref }}
         run: >
           node automation/scripts/qualify.mjs --repo pi-todo-list
           --source "$GITHUB_WORKSPACE/extension"
           --host fork --target "$RUNNER_TEMP/fork-package"
           --output "$RUNNER_TEMP/qualification-fork"
+      - name: Qualify supported development floor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PI_COMPAT_LANE_LABEL: development-floor
+        run: >
+          node automation/scripts/qualify.mjs --repo pi-todo-list
+          --source "$GITHUB_WORKSPACE/extension"
+          --host official --target "${{ steps.targets.outputs.development-floor }}"
+          --output "$RUNNER_TEMP/qualification-development-floor"
