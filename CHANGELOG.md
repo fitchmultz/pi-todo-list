@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2] - 2026-10-09
+
+### Fixed
+
+- Persist Todo mutations and recovery checkpoints through native custom entries so nested tool calls, including codemode scripts that fail after committing, survive reload and resume. Keep legacy tool-result replay, branch boundaries, compact logs, and fail-closed corruption recovery.
+- Roll back in-memory mutations when the journal append is rejected, without consuming IDs.
+
 ## [0.10.1] - 2026-10-02
 
 ### Fixed

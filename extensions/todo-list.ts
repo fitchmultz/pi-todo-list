@@ -27,6 +27,7 @@ import {
 
 const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
 const TODO_CONTEXT_TYPE = "todo-list-context";
+const TODO_STATE_TYPE = "todo-list-state";
 const DETAILS_VERSION = 7;
 const RECOVERY_VERSION = 6;
 const WIDGET_LIMIT = 8;
@@ -86,9 +87,18 @@ const NOT_TODO_RESULT = Symbol("not-todo-result");
 const NO_TODO_CHANGE = Symbol("no-todo-change");
 type BranchEntry = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[number];
 
-function entryDetails(entry: BranchEntry): unknown {
+function entryDetails(entry: BranchEntry, committedCalls: Set<string>): unknown {
+  if (entry.type === "custom" && entry.customType === TODO_STATE_TYPE) {
+    const data = entry.data as { toolCallId?: unknown; details?: unknown } | undefined;
+    if (!data || typeof data !== "object" || !hasExactKeys(data, ["toolCallId", "details"])
+      || typeof data.toolCallId !== "string" || !data.toolCallId || committedCalls.has(data.toolCallId)) return undefined;
+    committedCalls.add(data.toolCallId);
+    return data.details;
+  }
   if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "todo_list") {
     if ("namespace" in entry.message && entry.message.namespace !== undefined) return NOT_TODO_RESULT;
+    // The custom entry owns the commit; its transport result must not replay it twice.
+    if (committedCalls.has(entry.message.toolCallId)) return NO_TODO_CHANGE;
     const { details, isError } = entry.message;
     // A result hook can mark a committed mutation as an error after execute returns.
     if (isError && !isSnapshot(details) && !isMutationLog(details) && !isReadMarker(details)) return NO_TODO_CHANGE;
@@ -169,12 +179,14 @@ function replayLog(state: TodoState, log: MutationDetails): void {
 }
 
 function restore(branch: BranchEntry[], endIndex = branch.length): { state: TodoState; recoveryNeeded: boolean } {
+  const committedCalls = new Set<string>();
+  const history = branch.slice(0, endIndex).map((entry) => entryDetails(entry, committedCalls));
   let restored = emptyState();
   let checkpointIndex = -1;
   let restoreStopped = false;
 
   for (let index = endIndex - 1; index >= 0; index -= 1) {
-    const details = entryDetails(branch[index]!);
+    const details = history[index];
     if (!isSnapshot(details)) continue;
     const checkpoint = validatedSnapshot(details);
     if (!checkpoint) {
@@ -189,7 +201,7 @@ function restore(branch: BranchEntry[], endIndex = branch.length): { state: Todo
   const base = cloneState(restored);
   const appliedLogs: MutationDetails[] = [];
   for (let index = checkpointIndex + 1; index < endIndex; index += 1) {
-    const details = entryDetails(branch[index]!);
+    const details = history[index];
     if (details === NOT_TODO_RESULT || details === NO_TODO_CHANGE) continue;
     if (isReadMarker(details)) continue;
     if (!isMutationLog(details)) {
@@ -384,7 +396,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     ],
     parameters: Params,
     executionMode: "sequential",
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+      const previousLeaf = ctx.sessionManager.getLeafId();
       let message: string;
       let details: MutationDetails | ReadDetails | RecoveryDetails;
       if (params.status !== undefined && params.action !== "add") throw new Error("status is only supported for add");
@@ -405,15 +418,23 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         details = { version: DETAILS_VERSION, operations: [operation] };
       }
 
-      // State is already mutated; a render failure must not prevent returning its commit.
-      try {
-        updateWidget(ctx);
-      } catch {}
       const recovering = recoveryNeeded;
       if (recovering) {
         details = { version: RECOVERY_VERSION, state: cloneState(state) };
-        recoveryNeeded = false;
       }
+      if (params.action !== "list" || recovering) {
+        try {
+          pi.appendEntry(TODO_STATE_TYPE, { toolCallId, details: structuredClone(details) });
+        } catch (error) {
+          state = restore(previousLeaf ? ctx.sessionManager.getBranch(previousLeaf) : []).state;
+          throw error;
+        }
+      }
+      recoveryNeeded = false;
+      // State is already committed; a render failure must not discard its result.
+      try {
+        updateWidget(ctx);
+      } catch {}
       const result = params.action === "list" ? message : `${message}\n${formatTodoCounts(state)}`;
       const notice = recovering
         ? "Warning: Todo history was corrupt; later changes were not replayed. Saved the current list as a recovery checkpoint.\n"

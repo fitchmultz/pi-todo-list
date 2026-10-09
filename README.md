@@ -8,7 +8,7 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 - Start, pause, complete, reopen, update, move, remove, and atomic batch actions
 - Nested items with recursive completion and deletion
 - Paginated open-work listing plus an opt-in TUI widget and `/todos` controls
-- Session-local, branch-aware persistence through tool result details
+- Session-local, branch-aware persistence through native custom entries, including nested tool calls
 - Survives compaction (including retain-none rollover), resume, fork, and tree navigation
 
 ## Requirements
@@ -19,7 +19,7 @@ A small native Pi extension that gives agents a persistent, nested todo list.
 ## Install
 
 ```bash
-pi install git:github.com/fitchmultz/pi-todo-list@v0.10.1
+pi install git:github.com/fitchmultz/pi-todo-list@v0.10.2
 ```
 
 For local development:
@@ -81,9 +81,9 @@ Retain-none recovery reaches the first continued request in the same run. It is 
 
 ## State behavior
 
-Successful mutations persist as a compact operation log in tool-result `details`, while compaction context stays bounded and does not duplicate state. Resume and tree navigation replay those mutations on the active branch, using legacy snapshots and recovery checkpoints when present. Current entries use format 7 for mutations/reads and format 6 for recovery checkpoints. Mutation logs store resolved numeric IDs and initial statuses; older formats remain readable with their original semantics. Older format 3 pause operations retain their original pending state; old snapshots cannot distinguish paused work from other pending items. Legacy context-window snapshot replay remains supported by the extension; current hosts use public compaction rather than native windows. Old-format journals must follow the host's conversion procedure rather than being resumed directly. If restore encounters corrupt history, it warns, preserves the contiguous valid state, and writes one recovery checkpoint on the next successful `todo_list` call. Validated committed mutations also survive restoration if another extension subsequently marks their tool result as an error; failed calls without a commit leave state unchanged. This keeps session history linear without an extra database or project file. A new session starts with an empty list.
+Successful mutations persist as compact `todo-list-state` custom entries in the native session journal, independently of how the tool was called. This includes nested calls from codemode and calls committed before a script fails. Ordinary reads add no custom entry. Tool-result `details` remain available for callers and older histories; replay uses the custom commit once and ignores its matching transport result. Resume and tree navigation replay only the selected branch, using legacy snapshots and recovery checkpoints when present. Commit data contains the tool-call ID and the existing format 7 mutation details or format 6 recovery checkpoint. Mutation logs store resolved numeric IDs and initial statuses; older formats remain readable with their original semantics. Older format 3 pause operations retain their original pending state; old snapshots cannot distinguish paused work from other pending items. Legacy context-window snapshot replay remains supported by the extension; current hosts use public compaction rather than native windows. Old-format journals must follow the host's conversion procedure rather than being resumed directly. If restore encounters corrupt history, it warns, preserves the contiguous valid state, and writes one recovery checkpoint on the next successful `todo_list` call. Validated committed mutations also survive restoration if another extension subsequently marks their tool result as an error; failed calls without a commit leave state unchanged. A rejected journal append rolls back the in-memory mutation without consuming IDs. This keeps session history linear without an extra database or project file. A new session starts with an empty list. Older nested calls whose results were never journaled require manual recovery from available evidence; the extension does not guess state from script text or lossy call metadata.
 
-Do not open sessions written by this version with an older extension: older releases do not understand format 7. Existing sessions remain readable by this version.
+Do not open sessions written by this version with an older extension: older releases cannot replay custom commits, including nested mutations and recovery checkpoints. Existing journals remain readable by this version.
 
 ## Development
 

@@ -6,12 +6,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { contentText, createAssistantMessageEventStream, type AssistantMessage, type ToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import {
-  AgentSession, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
+  AgentSession, createAgentSession, createCodemodeExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
   type ContextWithSystemEvent, type ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 
 // Script only model output. Pi owns loading, tool execution, persistence and event delivery.
-async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolCallEvent) => Promise<void>, producerOrder?: "before" | "after") {
+async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolCallEvent) => Promise<void>, producerOrder?: "before" | "after", codemode = false) {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-native-"));
   const cwd = join(root, "project");
   const agentDir = join(root, "agent");
@@ -43,7 +43,7 @@ async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolC
       cwd, agentDir, settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       additionalExtensionPaths: extensionPaths,
-      extensionFactories: [(pi) => {
+      extensionFactories: [...(codemode ? [createCodemodeExtension()] : []), (pi) => {
         if (beforeToolCall) pi.on("tool_call", beforeToolCall);
         pi.on("context_with_system", (event) => { contexts.push(structuredClone(event.messages)); });
         pi.on("before_agent_start", (event) => {
@@ -67,17 +67,17 @@ async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolC
     assert.deepEqual(loader.getExtensions().extensions.slice(0, extensionPaths.length).map((extension) => extension.path), extensionPaths);
     ({ session } = await createAgentSession({
       cwd, agentDir, resourceLoader: loader, settingsManager: settings, sessionManager,
-      modelRuntime: runtime, model, thinkingLevel: "off", tools: ["todo_list"],
+      modelRuntime: runtime, model, thinkingLevel: "off", tools: codemode ? ["todo_list", "codemode"] : ["todo_list"],
     }));
     await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error) });
-    assert.deepEqual(session.getActiveToolNames(), ["todo_list"]);
+    assert.deepEqual(session.getActiveToolNames(), codemode ? ["todo_list", "codemode"] : ["todo_list"]);
     assert(session.extensionRunner.getCommand("todos"));
     return session;
   };
-  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false, inputTokens = 0, nextArgs?: ToolCall["arguments"]) => {
+  const prompt = async (args: ToolCall["arguments"] | ToolCall["arguments"][], expectError = false, inputTokens = 0, nextArgs?: ToolCall["arguments"], toolName = "todo_list") => {
     assert(session);
     const calls: ToolCall[] = (Array.isArray(args) ? args : [args]).map((arguments_) => ({
-      type: "toolCall", id: `todo-${++callId}`, name: "todo_list", arguments: arguments_,
+      type: "toolCall", id: `todo-${++callId}`, name: toolName, arguments: arguments_,
     }));
     const turns = [calls];
     if (nextArgs) turns.push([{ type: "toolCall", id: `todo-${++callId}`, name: "todo_list", arguments: nextArgs }]);
@@ -112,12 +112,60 @@ async function fixture(resultErrorTitle?: string, beforeToolCall?: (event: ToolC
   };
   return {
     start, prompt,
+    script: (code: string, expectError = false) => prompt({ code }, expectError, 0, undefined, "codemode"),
     setPromptSection: (text: string) => { promptSection = text; },
     createManager: () => SessionManager.create(cwd, join(root, "sessions")),
     close: () => { session?.dispose(); session = undefined; },
     cleanup: async () => { session?.dispose(); await rm(root, { recursive: true, force: true }); },
   };
 }
+
+test("native nested Todo commits survive script failure, reload, tree navigation and disk resume", { timeout: 30_000 }, async () => {
+  const f = await fixture(undefined, undefined, undefined, true);
+  try {
+    let session = await f.start(f.createManager());
+    const first = await f.prompt({ action: "add", text: "Original task" });
+    const nested = await f.script(`await tools.todo_list({action:"batch",operations:[
+      {action:"add",text:"Nested parent",status:"paused",link:"/parent.md",ref:"parent"},
+      {action:"add",text:"Nested child",status:"in_progress",parentId:"parent",link:"/child.md"}
+    ]}); throw new Error("After committed mutation");`, true);
+    const before = (await f.prompt({ action: "list" })).text;
+    assert.equal(before, "TODO: 1 active, 1 pending, 1 paused, 0 completed\n- #1 Original task\n⏸ #2 Nested parent [details]\n  > #3 Nested child [details]");
+    await session.reload();
+    assert.equal((await f.prompt({ action: "list" })).text, before);
+    assert.equal((await f.prompt({ action: "list", id: 3 })).text,
+      "#3 Nested child\nStatus: in progress\nParent: #2\nDetails: /child.md");
+    assert.equal((await session.navigateTree(first.entryId, { summarize: false })).cancelled, false);
+    assert.match((await f.script('return await tools.todo_list({action:"add",text:"Alternate branch"})')).text, /Added #2: Alternate branch/);
+    assert.equal((await session.navigateTree(nested.entryId, { summarize: false })).cancelled, false);
+    assert.equal((await f.prompt({ action: "list" })).text, before);
+    await session.compact();
+    const file = session.sessionFile;
+    assert(file);
+    f.close();
+    session = await f.start(SessionManager.open(file));
+    assert.equal((await f.prompt({ action: "list" })).text, before);
+    assert.match((await f.script('return await tools.todo_list({action:"add",text:"After resume",status:"completed"})')).text, /Added #4: After resume/);
+    await session.reload();
+    assert.equal((await f.prompt({ action: "list", id: 4 })).text, "#4 After resume\nStatus: completed");
+    session.sessionManager.appendCustomEntry("todo-list-state", {
+      toolCallId: "corrupt-custom-commit", details: { version: 7, operations: [
+        { action: "add", text: "Partial corrupt batch" }, { action: "missing" },
+      ] },
+    });
+    session.sessionManager.appendCustomEntry("todo-list-state", {
+      toolCallId: "after-corruption", details: { version: 7, operations: [{ action: "add", text: "Must not cross gap" }] },
+    });
+    await session.reload();
+    const recovered = await f.script('return await tools.todo_list({action:"list"})');
+    assert.match(recovered.text, /Warning: Todo history was corrupt/);
+    assert.match(recovered.text, /Nested child/);
+    assert.doesNotMatch(recovered.text, /Partial corrupt batch|Must not cross gap/);
+    await session.reload();
+    assert.equal((await f.prompt({ action: "list", id: 4 })).text, "#4 After resume\nStatus: completed");
+    assert.match((await f.prompt({ action: "add", text: "After recovery checkpoint" })).text, /Added #5: After recovery checkpoint/);
+  } finally { await f.cleanup(); }
+});
 
 test("native todo tool persists, follows tree selection, resumes, and survives compaction", { timeout: 30_000 }, async () => {
   const f = await fixture();
