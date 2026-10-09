@@ -65,6 +65,8 @@ jobs:
       - name: Use the extension npm version
         run: npm install --global "$(node -p 'require("./extension/package.json").packageManager')"
       - name: Qualify official Pi
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: >
           node automation/scripts/qualify.mjs --repo pi-todo-list
           --source "$GITHUB_WORKSPACE/extension"
