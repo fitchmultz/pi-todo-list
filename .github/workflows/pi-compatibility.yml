@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PI_AUTOMATION_REF: 082c559dde8ea1f899c4403c77e7cd44b1af4407 # fix/npm12-qualification
+  PI_AUTOMATION_REF: 54c687228d840506555801b9db038373e697d901 # fix/npm12-qualification
 
 jobs:
   compatibility:
