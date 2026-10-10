@@ -148,19 +148,20 @@ test("native tool IDs can repeat or be empty without losing direct or nested com
   });
 });
 
-test("native persist failure preserves the original error and current branch projection across reload", { timeout: 30_000 }, async () => {
+test("native persist failure preserves branch projection and recovery admission until a successful read", { timeout: 30_000 }, async () => {
   let session: AgentSession | undefined;
   let faultFile: string | undefined;
+  let failRecoveryRead = false;
   const f = await fixture(undefined, async event => {
-    if (event.toolName === "todo_list" && event.input.text === "Persist failure") {
+    if (event.toolName === "todo_list" && (event.input.text === "Persist failure" || (failRecoveryRead && event.input.action === "list"))) {
       assert(session?.sessionFile);
+      failRecoveryRead = false;
       faultFile = session.sessionFile;
       renameSync(faultFile, `${faultFile}.saved`);
       mkdirSync(faultFile);
     }
   }, undefined, false, event => {
-    if (event.toolName === "todo_list" && event.input.text === "Persist failure") {
-      assert(faultFile);
+    if (event.toolName === "todo_list" && faultFile) {
       rmdirSync(faultFile);
       renameSync(`${faultFile}.saved`, faultFile);
       faultFile = undefined;
@@ -176,6 +177,31 @@ test("native persist failure preserves the original error and current branch pro
     await session.reload();
     assert.equal((await f.prompt({ action: "list" })).text, expected);
     assert.match((await f.prompt({ action: "add", text: "Next ID" })).text, /Added #3: Next ID/);
+    session.sessionManager.appendCustomEntry("todo-list-state", {
+      toolCallId: "corrupt-before-failed-recovery", details: { version: 8, operations: [
+        { action: "add", id: 4, text: "Partial must roll back" },
+        { action: "update", id: 999, text: "Missing prerequisite" },
+      ] },
+    });
+    await session.reload();
+    failRecoveryRead = true;
+    const failedRead = await f.prompt({ action: "list" }, true);
+    assert.match(failedRead.text, /EISDIR/);
+    const checkpoint = session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state");
+    assert(checkpoint?.type === "custom", "native append advances the branch even when its disk write fails");
+    const recoveryDetails = { version: 6, state: { nextId: 4, items: [
+      { id: 1, text: "Retained", status: "pending" },
+      { id: 2, text: "Persist failure", status: "pending" },
+      { id: 3, text: "Next ID", status: "pending" },
+    ] } };
+    assert.deepEqual((checkpoint.data as { details: unknown }).details, recoveryDetails);
+    const rejected = await f.prompt({ action: "add", text: "Still unsafe" }, true);
+    assert.match(rejected.text, /no mutation applied/);
+    assert.equal(session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state")?.id, checkpoint.id);
+    const recovered = await f.prompt({ action: "list" });
+    assert.match(recovered.text, /Warning: Todo history was corrupt[\s\S]*Next ID 4[\s\S]*Manually reconcile/);
+    assert.deepEqual(recovered.details, recoveryDetails, "neither the corrupt partial add nor rejected mutation consumes IDs or changes state");
+    assert.match((await f.prompt({ action: "add", text: "After warned recovery" })).text, /Added #4: After warned recovery/);
   } finally {
     if (faultFile) {
       rmdirSync(faultFile);
