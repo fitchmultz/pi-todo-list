@@ -223,10 +223,11 @@ test("native nested Todo commits survive script failure, reload, tree navigation
     });
     await session.reload();
     const commitsBefore = session.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "todo-list-state");
-    for (const params of [
+    const pendingMutations: ToolCall["arguments"][] = [
       { action: "add", text: "Unsafe pending addition" },
       { action: "batch", operations: [{ action: "complete", id: 1 }, { action: "add", text: "Unsafe pending batch" }] },
-    ]) {
+    ];
+    for (const params of pendingMutations) {
       const rejected = await f.prompt(params, true);
       assert.match(rejected.text, /no mutation applied/);
       assert.deepEqual(session.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "todo-list-state"), commitsBefore);

@@ -444,7 +444,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
           // Native append may advance the branch before persistence fails.
           const restored = restore(ctx.sessionManager.getBranch());
           state = restored.state;
-          recoveryNeeded = restored.recoveryNeeded;
+          recoveryNeeded = recovering || restored.recoveryNeeded;
           try {
             updateWidget(ctx);
           } catch {}
