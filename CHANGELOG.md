@@ -5,6 +5,7 @@
 ### Fixed
 
 - Reject pending mutations and batches before changing state or IDs when restore encounters corrupt history. Only a successful list read checkpoints the unchanged valid prefix, with a warning to reconcile missing tasks and ID gaps before creating new work. Recovery does not reconstruct omitted history or certify the allocator as complete.
+- Keep a failed recovery checkpoint pending across reload and tree navigation when native append advances the branch before its file write fails. Best-effort format 9 pending snapshots retain the unchanged prefix; preappend rejections leave the branch unchanged, and secondary write errors never replace the original failure.
 
 ### Added
 

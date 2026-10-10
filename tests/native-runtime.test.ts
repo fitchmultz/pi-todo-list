@@ -187,20 +187,34 @@ test("native persist failure preserves branch projection and recovery admission 
     failRecoveryRead = true;
     const failedRead = await f.prompt({ action: "list" }, true);
     assert.match(failedRead.text, /EISDIR/);
-    const checkpoint = session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state");
+    const commits = session.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "todo-list-state");
+    const checkpoint = commits.at(-2);
+    const pending = commits.at(-1);
     assert(checkpoint?.type === "custom", "native append advances the branch even when its disk write fails");
+    assert(pending?.type === "custom");
+    assert.equal(pending.parentId, checkpoint.id);
     const recoveryDetails = { version: 6, state: { nextId: 4, items: [
       { id: 1, text: "Retained", status: "pending" },
       { id: 2, text: "Persist failure", status: "pending" },
       { id: 3, text: "Next ID", status: "pending" },
     ] } };
     assert.deepEqual((checkpoint.data as { details: unknown }).details, recoveryDetails);
+    assert.deepEqual((pending.data as { details: unknown }).details, { ...recoveryDetails, version: 9 });
     const rejected = await f.prompt({ action: "add", text: "Still unsafe" }, true);
     assert.match(rejected.text, /no mutation applied/);
-    assert.equal(session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state")?.id, checkpoint.id);
+    await session.reload();
+    const rejectedAfterReload = await f.prompt({ action: "add", text: "Still unsafe after reload" }, true);
+    assert.match(rejectedAfterReload.text, /no mutation applied/);
+    assert.equal((await session.navigateTree(rejected.entryId, { summarize: false })).cancelled, false);
+    const rejectedAfterTree = await f.prompt({ action: "batch", operations: [
+      { action: "complete", id: 1 }, { action: "add", text: "Still unsafe after tree navigation" },
+    ] }, true);
+    assert.match(rejectedAfterTree.text, /no mutation applied/);
+    assert.equal(session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state")?.id, pending.id);
     const recovered = await f.prompt({ action: "list" });
     assert.match(recovered.text, /Warning: Todo history was corrupt[\s\S]*Next ID 4[\s\S]*Manually reconcile/);
     assert.deepEqual(recovered.details, recoveryDetails, "neither the corrupt partial add nor rejected mutation consumes IDs or changes state");
+    await session.reload();
     assert.match((await f.prompt({ action: "add", text: "After warned recovery" })).text, /Added #4: After warned recovery/);
   } finally {
     if (faultFile) {

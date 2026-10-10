@@ -30,6 +30,7 @@ const TODO_CONTEXT_TYPE = "todo-list-context";
 const TODO_STATE_TYPE = "todo-list-state";
 const DETAILS_VERSION = 8;
 const RECOVERY_VERSION = 6;
+const PENDING_RECOVERY_VERSION = 9;
 const WIDGET_LIMIT = 8;
 
 interface LegacySnapshotDetails {
@@ -38,7 +39,7 @@ interface LegacySnapshotDetails {
   state: unknown;
 }
 interface RecoveryDetails {
-  version: 4 | 6;
+  version: 4 | 6 | 9;
   state: unknown;
 }
 type SnapshotDetails = LegacySnapshotDetails | RecoveryDetails;
@@ -121,7 +122,7 @@ function hasExactKeys(value: object, keys: readonly string[]): boolean {
 function isSnapshot(details: unknown): details is SnapshotDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; action?: unknown };
-  if (candidate.version === 4 || candidate.version === RECOVERY_VERSION) return hasExactKeys(details, ["version", "state"]);
+  if (candidate.version === 4 || candidate.version === RECOVERY_VERSION || candidate.version === PENDING_RECOVERY_VERSION) return hasExactKeys(details, ["version", "state"]);
   return (candidate.version === 1 || candidate.version === 2)
     && typeof candidate.action === "string"
     && hasExactKeys(details, ["version", "action", "state"]);
@@ -207,6 +208,7 @@ function restore(branch: BranchEntry[], endIndex = branch.length): { state: Todo
       continue;
     }
     restored = checkpoint;
+    restoreStopped ||= details.version === PENDING_RECOVERY_VERSION;
     checkpointIndex = index;
     break;
   }
@@ -438,13 +440,29 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         details = { version: RECOVERY_VERSION, state: cloneState(state) };
       }
       if (params.action !== "list" || recovering) {
+        const previousLeaf = recovering ? ctx.sessionManager.getLeafId() : null;
+        const commit = { toolCallId, details: structuredClone(details) };
         try {
-          pi.appendEntry(TODO_STATE_TYPE, { toolCallId, details: structuredClone(details) });
+          pi.appendEntry(TODO_STATE_TYPE, commit);
         } catch (error) {
           // Native append may advance the branch before persistence fails.
-          const restored = restore(ctx.sessionManager.getBranch());
+          const branch = ctx.sessionManager.getBranch();
+          const restored = restore(branch);
           state = restored.state;
           recoveryNeeded = recovering || restored.recoveryNeeded;
+          if (recovering) {
+            try {
+              const last = branch.at(-1);
+              if (ctx.sessionManager.getLeafId() !== previousLeaf
+                && last?.type === "custom" && last.customType === TODO_STATE_TYPE
+                && JSON.stringify(last.data) === JSON.stringify(commit)) {
+                // Keep the failed read unacknowledged across reload/tree navigation.
+                pi.appendEntry(TODO_STATE_TYPE, {
+                  toolCallId, details: { version: PENDING_RECOVERY_VERSION, state: cloneState(state) },
+                });
+              }
+            } catch {} // Preserve the original write error even if the pending marker also fails.
+          }
           try {
             updateWidget(ctx);
           } catch {}
