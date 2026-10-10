@@ -28,8 +28,9 @@ import {
 const ACTIONS = ["list", ...TODO_MUTATIONS, "batch"] as const;
 const TODO_CONTEXT_TYPE = "todo-list-context";
 const TODO_STATE_TYPE = "todo-list-state";
-const DETAILS_VERSION = 7;
+const DETAILS_VERSION = 8;
 const RECOVERY_VERSION = 6;
+const PENDING_RECOVERY_VERSION = 9;
 const WIDGET_LIMIT = 8;
 
 interface LegacySnapshotDetails {
@@ -38,16 +39,16 @@ interface LegacySnapshotDetails {
   state: unknown;
 }
 interface RecoveryDetails {
-  version: 4 | 6;
+  version: 4 | 6 | 9;
   state: unknown;
 }
 type SnapshotDetails = LegacySnapshotDetails | RecoveryDetails;
 interface MutationDetails {
-  version: 3 | 5 | 7;
+  version: 3 | 5 | 7 | 8;
   operations: TodoMutation[];
 }
 interface ReadDetails {
-  version: 3 | 5 | 7;
+  version: 3 | 5 | 7 | 8;
   read: "list";
 }
 const Link = Type.Optional(Type.Union([
@@ -59,7 +60,7 @@ const Status = Type.Optional(StringEnum(TODO_STATUSES, { description: "Initial s
 const BatchId = Type.Optional(Type.Union([
   Type.Integer({ minimum: 1 }),
   Type.String({ minLength: 1, maxLength: TODO_REF_LIMIT }),
-], { description: "Existing numeric todo ID or an earlier add's ref in this batch" }));
+], { description: "Numeric ID (on add, at least the next ID); other actions can use an earlier add's ref in this batch" }));
 
 const Mutation = Type.Object({
   action: StringEnum(TODO_MUTATIONS),
@@ -73,7 +74,7 @@ const Mutation = Type.Object({
 
 const Params = Type.Object({
   action: StringEnum(ACTIONS),
-  id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID for list (one item with its detail link), update, move, start, pause, complete, reopen, or remove" })),
+  id: Type.Optional(Type.Integer({ minimum: 1, description: "Todo ID; on add, optionally skip forward to an unused numeric ID at least the next ID (never reuse lower IDs)" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: TODO_TEXT_LIMIT, description: "Short action title for add or update; put hashes, logs, and evidence in the linked details" })),
   link: Link,
   status: Status,
@@ -87,12 +88,19 @@ const NOT_TODO_RESULT = Symbol("not-todo-result");
 const NO_TODO_CHANGE = Symbol("no-todo-change");
 type BranchEntry = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[number];
 
+function customCommit(entry: BranchEntry | undefined): { toolCallId: string; details: unknown } | undefined {
+  if (entry?.type !== "custom" || entry.customType !== TODO_STATE_TYPE) return undefined;
+  const data = entry.data as { toolCallId?: unknown; details?: unknown } | undefined;
+  if (!data || typeof data !== "object" || !hasExactKeys(data, ["toolCallId", "details"])
+    || typeof data.toolCallId !== "string") return undefined;
+  return { toolCallId: data.toolCallId, details: data.details };
+}
+
 function entryDetails(entry: BranchEntry, pendingResults: Map<string, number>): unknown {
   if (entry.type === "message" && entry.message.role === "assistant") pendingResults.clear();
   if (entry.type === "custom" && entry.customType === TODO_STATE_TYPE) {
-    const data = entry.data as { toolCallId?: unknown; details?: unknown } | undefined;
-    if (!data || typeof data !== "object" || !hasExactKeys(data, ["toolCallId", "details"])
-      || typeof data.toolCallId !== "string") return undefined;
+    const data = customCommit(entry);
+    if (!data) return undefined;
     pendingResults.set(data.toolCallId, (pendingResults.get(data.toolCallId) ?? 0) + 1);
     return data.details;
   }
@@ -121,7 +129,7 @@ function hasExactKeys(value: object, keys: readonly string[]): boolean {
 function isSnapshot(details: unknown): details is SnapshotDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; action?: unknown };
-  if (candidate.version === 4 || candidate.version === RECOVERY_VERSION) return hasExactKeys(details, ["version", "state"]);
+  if (candidate.version === 4 || candidate.version === RECOVERY_VERSION || candidate.version === PENDING_RECOVERY_VERSION) return hasExactKeys(details, ["version", "state"]);
   return (candidate.version === 1 || candidate.version === 2)
     && typeof candidate.action === "string"
     && hasExactKeys(details, ["version", "action", "state"]);
@@ -130,7 +138,7 @@ function isSnapshot(details: unknown): details is SnapshotDetails {
 function isMutationLog(details: unknown): details is MutationDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; operations?: unknown };
-  return (candidate.version === 3 || candidate.version === 5 || candidate.version === DETAILS_VERSION)
+  return (candidate.version === 3 || candidate.version === 5 || candidate.version === 7 || candidate.version === DETAILS_VERSION)
     && Array.isArray(candidate.operations)
     && candidate.operations.length > 0
     && candidate.operations.length <= BATCH_OPERATION_LIMIT
@@ -140,7 +148,7 @@ function isMutationLog(details: unknown): details is MutationDetails {
 function isReadMarker(details: unknown): details is ReadDetails {
   if (!details || typeof details !== "object") return false;
   const candidate = details as { version?: unknown; read?: unknown };
-  return (candidate.version === 3 || candidate.version === 5 || candidate.version === DETAILS_VERSION) && candidate.read === "list" && hasExactKeys(details, ["version", "read"]);
+  return (candidate.version === 3 || candidate.version === 5 || candidate.version === 7 || candidate.version === DETAILS_VERSION) && candidate.read === "list" && hasExactKeys(details, ["version", "read"]);
 }
 
 function validatedSnapshot(details: SnapshotDetails): TodoState | undefined {
@@ -177,14 +185,23 @@ function decodeLegacyOperation(value: unknown, version: 3 | 5): TodoMutation {
 
 function replayLog(state: TodoState, log: MutationDetails): void {
   for (const stored of log.operations) {
-    const operation = log.version === DETAILS_VERSION ? normalizeTodoMutation(stored) : decodeLegacyOperation(stored, log.version);
+    const operation = log.version === 3 || log.version === 5
+      ? decodeLegacyOperation(stored, log.version)
+      : normalizeTodoMutation(stored);
+    if (operation.action === "add") {
+      // Format 7 allocated implicitly and rejected add.id; format 8 records the assigned ID.
+      if (log.version === 7 && operation.id !== undefined) throw new Error("Unexpected add id in format 7");
+      if (log.version === DETAILS_VERSION && operation.id === undefined) throw new Error("Missing assigned add id");
+    }
     applyTodoMutation(state, operation, false);
     // Before v5, pause meant pending. Preserve the state of those older branches.
     if (log.version === 3 && operation.action === "pause") state.items.find((todo) => todo.id === operation.id)!.status = "pending";
   }
 }
 
-function restore(branch: BranchEntry[], endIndex = branch.length): { state: TodoState; recoveryNeeded: boolean } {
+function restore(
+  branch: BranchEntry[], endIndex = branch.length, failedCheckpoint?: (entry: BranchEntry) => boolean,
+): { state: TodoState; recoveryNeeded: boolean } {
   const pendingResults = new Map<string, number>();
   const history = branch.slice(0, endIndex).map((entry) => entryDetails(entry, pendingResults));
   let restored = emptyState();
@@ -200,6 +217,8 @@ function restore(branch: BranchEntry[], endIndex = branch.length): { state: Todo
       continue;
     }
     restored = checkpoint;
+    restoreStopped ||= details.version === PENDING_RECOVERY_VERSION
+      || (details.version === RECOVERY_VERSION && failedCheckpoint?.(branch[index]!) === true);
     checkpointIndex = index;
     break;
   }
@@ -239,6 +258,29 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   let boundaryContext: { id: string; message: ContextWithSystemEvent["messages"][number] | null } | undefined;
   let observedLeaf: string | null = null;
   let compaction: BranchEntry | undefined;
+  let failedCheckpoints: Set<string> | undefined;
+  let failedIndexSession: string | undefined;
+
+  const failedRecoveryCheckpoints = (ctx: ExtensionContext): Set<string> => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    if (failedCheckpoints && failedIndexSession === sessionId) return failedCheckpoints;
+    const failed = new Set<string>();
+    // Off-branch markers classify append failures only; task state still follows getBranch().
+    for (const entry of ctx.sessionManager.getEntries()) {
+      const marker = customCommit(entry);
+      if (!marker || !entry.parentId || !isSnapshot(marker.details) || marker.details.version !== PENDING_RECOVERY_VERSION) continue;
+      const parent = ctx.sessionManager.getEntry(entry.parentId);
+      const checkpoint = customCommit(parent);
+      if (!parent || !checkpoint || checkpoint.toolCallId !== marker.toolCallId
+        || !isSnapshot(checkpoint.details) || checkpoint.details.version !== RECOVERY_VERSION) continue;
+      const pendingState = validatedSnapshot(marker.details);
+      const checkpointState = validatedSnapshot(checkpoint.details);
+      if (pendingState && checkpointState && JSON.stringify(pendingState) === JSON.stringify(checkpointState)) failed.add(parent.id);
+    }
+    failedIndexSession = sessionId;
+    failedCheckpoints = failed;
+    return failed;
+  };
 
   const latestCompaction = (ctx: ExtensionContext): BranchEntry | undefined => {
     const leaf = ctx.sessionManager.getLeafId();
@@ -308,16 +350,21 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     boundaryContext = undefined;
     observedLeaf = null;
     compaction = undefined;
-    const restored = restore(ctx.sessionManager.getBranch());
+    const restored = restore(ctx.sessionManager.getBranch(), undefined,
+      (entry) => failedRecoveryCheckpoints(ctx).has(entry.id));
     state = restored.state;
     recoveryNeeded = restored.recoveryNeeded;
-    if (recoveryNeeded && ctx.hasUI) ctx.ui.notify("Todo restore stopped at corrupt session data; later changes were not replayed.", "warning");
+    if (recoveryNeeded && ctx.hasUI) ctx.ui.notify("Todo restore stopped at corrupt session data; later changes were not replayed. Mutations are blocked until a successful todo_list list read checkpoints the valid prefix; manual reconciliation is then required.", "warning");
     updateWidget(ctx);
   };
 
   const hasTodoHistory = (): boolean => state.items.length > 0 || state.nextId > 1;
 
-  pi.on("session_start", (_event, ctx) => rehydrate(ctx));
+  pi.on("session_start", (_event, ctx) => {
+    failedCheckpoints = undefined;
+    failedIndexSession = undefined;
+    rehydrate(ctx);
+  });
   pi.on("session_tree", (_event, ctx) => rehydrate(ctx));
 
   pi.on("context_with_system", (event, ctx) => {
@@ -403,6 +450,9 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     parameters: Params,
     executionMode: "sequential",
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+      if (recoveryNeeded && params.action !== "list") {
+        throw new Error('Todo history was corrupt; no mutation applied. Call todo_list with action: "list" to checkpoint the valid prefix, then manually reconcile missing tasks and ID gaps from trusted records before creating new work.');
+      }
       let message: string;
       let details: MutationDetails | ReadDetails | RecoveryDetails;
       if (params.status !== undefined && params.action !== "add") throw new Error("status is only supported for add");
@@ -428,13 +478,30 @@ export default function todoListExtension(pi: ExtensionAPI): void {
         details = { version: RECOVERY_VERSION, state: cloneState(state) };
       }
       if (params.action !== "list" || recovering) {
+        const previousLeaf = recovering ? ctx.sessionManager.getLeafId() : null;
+        const commit = { toolCallId, details: structuredClone(details) };
         try {
-          pi.appendEntry(TODO_STATE_TYPE, { toolCallId, details: structuredClone(details) });
+          pi.appendEntry(TODO_STATE_TYPE, commit);
         } catch (error) {
           // Native append may advance the branch before persistence fails.
-          const restored = restore(ctx.sessionManager.getBranch());
+          const branch = ctx.sessionManager.getBranch();
+          const restored = restore(branch);
           state = restored.state;
-          recoveryNeeded = restored.recoveryNeeded;
+          recoveryNeeded = recovering || restored.recoveryNeeded;
+          if (recovering) {
+            try {
+              const last = branch.at(-1);
+              if (ctx.sessionManager.getLeafId() !== previousLeaf
+                && last?.type === "custom" && last.customType === TODO_STATE_TYPE
+                && JSON.stringify(last.data) === JSON.stringify(commit)) {
+                failedRecoveryCheckpoints(ctx).add(last.id);
+                // Keep the failed read unacknowledged across reload/tree navigation.
+                pi.appendEntry(TODO_STATE_TYPE, {
+                  toolCallId, details: { version: PENDING_RECOVERY_VERSION, state: cloneState(state) },
+                });
+              }
+            } catch {} // Preserve the original write error even if the pending marker also fails.
+          }
           try {
             updateWidget(ctx);
           } catch {}
@@ -448,7 +515,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       } catch {}
       const result = params.action === "list" ? message : `${message}\n${formatTodoCounts(state)}`;
       const notice = recovering
-        ? "Warning: Todo history was corrupt; later changes were not replayed. Saved the current list as a recovery checkpoint.\n"
+        ? `Warning: Todo history was corrupt; later changes were not replayed. Saved only the contiguous valid prefix as a recovery checkpoint. Next ID ${state.nextId} reflects only this prefix, not omitted history. Manually reconcile missing tasks and ID gaps from trusted records before creating new work.\n`
         : "";
       return { content: [{ type: "text", text: `${notice}${result}` }], details };
     },

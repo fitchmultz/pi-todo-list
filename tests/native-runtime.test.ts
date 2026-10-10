@@ -148,19 +148,20 @@ test("native tool IDs can repeat or be empty without losing direct or nested com
   });
 });
 
-test("native persist failure preserves the original error and current branch projection across reload", { timeout: 30_000 }, async () => {
+test("native persist failure preserves branch projection and recovery admission until a successful read", { timeout: 30_000 }, async () => {
   let session: AgentSession | undefined;
   let faultFile: string | undefined;
+  let failRecoveryRead = false;
   const f = await fixture(undefined, async event => {
-    if (event.toolName === "todo_list" && event.input.text === "Persist failure") {
+    if (event.toolName === "todo_list" && (event.input.text === "Persist failure" || (failRecoveryRead && event.input.action === "list"))) {
       assert(session?.sessionFile);
+      failRecoveryRead = false;
       faultFile = session.sessionFile;
       renameSync(faultFile, `${faultFile}.saved`);
       mkdirSync(faultFile);
     }
   }, undefined, false, event => {
-    if (event.toolName === "todo_list" && event.input.text === "Persist failure") {
-      assert(faultFile);
+    if (event.toolName === "todo_list" && faultFile) {
       rmdirSync(faultFile);
       renameSync(`${faultFile}.saved`, faultFile);
       faultFile = undefined;
@@ -168,7 +169,7 @@ test("native persist failure preserves the original error and current branch pro
   });
   try {
     session = await f.start(f.createManager());
-    await f.prompt({ action: "add", text: "Retained" });
+    const retained = await f.prompt({ action: "add", text: "Retained" });
     const failure = await f.prompt({ action: "add", text: "Persist failure" }, true);
     assert.match(failure.text, /EISDIR/);
     const expected = "TODO: 0 active, 2 pending, 0 completed\n- #1 Retained\n- #2 Persist failure";
@@ -176,6 +177,54 @@ test("native persist failure preserves the original error and current branch pro
     await session.reload();
     assert.equal((await f.prompt({ action: "list" })).text, expected);
     assert.match((await f.prompt({ action: "add", text: "Next ID" })).text, /Added #3: Next ID/);
+    session.sessionManager.appendCustomEntry("todo-list-state", {
+      toolCallId: "corrupt-before-failed-recovery", details: { version: 8, operations: [
+        { action: "add", id: 4, text: "Partial must roll back" },
+        { action: "update", id: 999, text: "Missing prerequisite" },
+      ] },
+    });
+    await session.reload();
+    failRecoveryRead = true;
+    const failedRead = await f.prompt({ action: "list" }, true);
+    assert.match(failedRead.text, /EISDIR/);
+    const commits = session.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "todo-list-state");
+    const checkpoint = commits.at(-2);
+    const pending = commits.at(-1);
+    assert(checkpoint?.type === "custom", "native append advances the branch even when its disk write fails");
+    assert(pending?.type === "custom");
+    assert.equal(pending.parentId, checkpoint.id);
+    const recoveryDetails = { version: 6, state: { nextId: 4, items: [
+      { id: 1, text: "Retained", status: "pending" },
+      { id: 2, text: "Persist failure", status: "pending" },
+      { id: 3, text: "Next ID", status: "pending" },
+    ] } };
+    assert.deepEqual((checkpoint.data as { details: unknown }).details, recoveryDetails);
+    assert.deepEqual((pending.data as { details: unknown }).details, { ...recoveryDetails, version: 9 });
+    const rejected = await f.prompt({ action: "add", text: "Still unsafe" }, true);
+    assert.match(rejected.text, /no mutation applied/);
+    await session.reload();
+    const rejectedAfterReload = await f.prompt({ action: "add", text: "Still unsafe after reload" }, true);
+    assert.match(rejectedAfterReload.text, /no mutation applied/);
+    assert.equal((await session.navigateTree(rejected.entryId, { summarize: false })).cancelled, false);
+    const rejectedAfterTree = await f.prompt({ action: "batch", operations: [
+      { action: "complete", id: 1 }, { action: "add", text: "Still unsafe after tree navigation" },
+    ] }, true);
+    assert.match(rejectedAfterTree.text, /no mutation applied/);
+    assert.equal(session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state")?.id, pending.id);
+    assert.equal((await session.navigateTree(checkpoint.id, { summarize: false })).cancelled, false);
+    const rejectedAtCheckpoint = await f.prompt({ action: "add", text: "Still unsafe at failed checkpoint" }, true);
+    assert.match(rejectedAtCheckpoint.text, /no mutation applied/);
+    assert.equal(session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state")?.id, checkpoint.id);
+    assert.equal((await session.navigateTree(retained.entryId, { summarize: false })).cancelled, false);
+    assert.equal((await f.prompt({ action: "list" })).text, "TODO: 0 active, 1 pending, 0 completed\n- #1 Retained");
+    assert.match((await f.prompt({ action: "add", text: "Unrelated branch" })).text, /Added #2: Unrelated branch/);
+    assert.equal((await session.navigateTree(checkpoint.id, { summarize: false })).cancelled, false);
+    assert.match((await f.prompt({ action: "add", text: "Still unsafe after unrelated branch" }, true)).text, /no mutation applied/);
+    const recovered = await f.prompt({ action: "list" });
+    assert.match(recovered.text, /Warning: Todo history was corrupt[\s\S]*Next ID 4[\s\S]*Manually reconcile/);
+    assert.deepEqual(recovered.details, recoveryDetails, "neither the corrupt partial add nor rejected mutation consumes IDs or changes state");
+    await session.reload();
+    assert.match((await f.prompt({ action: "add", text: "After warned recovery" })).text, /Added #4: After warned recovery/);
   } finally {
     if (faultFile) {
       rmdirSync(faultFile);
@@ -222,7 +271,25 @@ test("native nested Todo commits survive script failure, reload, tree navigation
       toolCallId: "after-corruption", details: { version: 7, operations: [{ action: "add", text: "Must not cross gap" }] },
     });
     await session.reload();
+    const commitsBefore = session.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "todo-list-state");
+    const pendingMutations: ToolCall["arguments"][] = [
+      { action: "add", text: "Unsafe pending addition" },
+      { action: "batch", operations: [{ action: "complete", id: 1 }, { action: "add", text: "Unsafe pending batch" }] },
+    ];
+    for (const params of pendingMutations) {
+      const rejected = await f.prompt(params, true);
+      assert.match(rejected.text, /no mutation applied/);
+      assert.deepEqual(session.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "todo-list-state"), commitsBefore);
+    }
     const recovered = await f.script('return await tools.todo_list({action:"list"})');
+    const checkpoint = session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state");
+    assert(checkpoint?.type === "custom");
+    assert.deepEqual((checkpoint.data as { details: unknown }).details, { version: 6, state: { nextId: 5, items: [
+      { id: 1, text: "Original task", status: "pending" },
+      { id: 2, text: "Nested parent", status: "paused", link: "/parent.md" },
+      { id: 3, text: "Nested child", status: "in_progress", parentId: 2, link: "/child.md" },
+      { id: 4, text: "After resume", status: "completed" },
+    ] } });
     assert.match(recovered.text, /Warning: Todo history was corrupt/);
     assert.match(recovered.text, /Nested child/);
     assert.doesNotMatch(recovered.text, /Partial corrupt batch|Must not cross gap/);
@@ -290,7 +357,7 @@ test("native null link placeholders work without changing explicit link clearing
       action: "complete", id: 1, text: null, link: null, status: null,
       parentId: null, operations: null, offset: null, limit: null,
     });
-    assert.deepEqual(completed.details, { version: 7, operations: [{ action: "complete", id: 1 }] });
+    assert.deepEqual(completed.details, { version: 8, operations: [{ action: "complete", id: 1 }] });
     assert.equal((await f.prompt({ action: "list", id: 1 })).text,
       "#1 Linked task\nStatus: completed\nDetails: /notes/task.md");
 
@@ -301,7 +368,7 @@ test("native null link placeholders work without changing explicit link clearing
     const batch = await f.prompt({
       action: "batch", operations: operations.map((operation) => ({ ...operation, link: null })),
     });
-    assert.deepEqual(batch.details, { version: 7, operations });
+    assert.deepEqual(batch.details, { version: 8, operations });
     await session.reload();
     assert.equal((await f.prompt({ action: "list", id: 1 })).text,
       "#1 Linked task\nStatus: paused\nDetails: /notes/task.md");
@@ -346,22 +413,25 @@ test("native sibling results preserve reference commits and exact branch boundar
     ] });
     const siblings = await f.prompt([
       { action: "batch", operations: [
-        { action: "add", text: "Paused parent", status: "paused", ref: "001", link: "/notes/parent.md" },
+        { action: "add", id: 12, text: "Paused parent", status: "paused", ref: "001", link: "/notes/parent.md" },
         { action: "add", text: "Active child", status: "in_progress", parentId: "001" },
       ] },
       { action: "add", text: "Later sibling", status: "completed" },
     ]);
     const [first, second] = siblings.results;
     assert(first && second);
-    assert.match(first.text, /Added #2: Paused parent/);
-    assert.match(second.text, /Added #4: Later sibling/);
+    assert.match(first.text, /Added #12: Paused parent/);
+    assert.match(second.text, /Added #14: Later sibling/);
     const persisted = JSON.stringify(first.details);
-    assert.match(persisted, /"parentId":2/);
+    assert.deepEqual(first.details, { version: 8, operations: [
+      { action: "add", id: 12, text: "Paused parent", status: "paused", link: "/notes/parent.md" },
+      { action: "add", id: 13, text: "Active child", status: "in_progress", parentId: 12 },
+    ] });
     assert.doesNotMatch(persisted, /"ref"|"parentId":"001"/);
-    assert.match((await f.prompt({ action: "list", id: 4 })).text, /Status: completed/);
+    assert.match((await f.prompt({ action: "list", id: 14 })).text, /Status: completed/);
 
     assert.equal((await session.navigateTree(first.entryId, { summarize: false })).cancelled, false);
-    assert.match((await f.prompt({ action: "add", text: "Branch allocation" })).text, /Added #4: Branch allocation/);
+    assert.match((await f.prompt({ action: "add", text: "Branch allocation" })).text, /Added #14: Branch allocation/);
     await session.reload();
     const file = session.sessionFile;
     assert(file);
@@ -371,9 +441,9 @@ test("native sibling results preserve reference commits and exact branch boundar
     const restored = await f.prompt({ action: "list" });
     assert.match(restored.text, /1 active, 1 pending, 1 paused, 0 completed/);
     assert.doesNotMatch(restored.text, /Later sibling/);
-    assert.equal((await f.prompt({ action: "list", id: 3 })).text,
-      "#3 Active child\nStatus: in progress\nParent: #2");
-    assert.match((await f.prompt({ action: "list", id: 2 })).text, /Status: paused\nDetails: \/notes\/parent.md/);
+    assert.equal((await f.prompt({ action: "list", id: 13 })).text,
+      "#13 Active child\nStatus: in progress\nParent: #12");
+    assert.match((await f.prompt({ action: "list", id: 12 })).text, /Status: paused\nDetails: \/notes\/parent.md/);
   } finally { await f.cleanup(); }
 });
 

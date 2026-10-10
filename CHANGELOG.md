@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.10.3] - 2026-10-10
+
+### Fixed
+
+- Reject pending mutations and batches before changing state or IDs when restore encounters corrupt history. Only a successful list read checkpoints the unchanged valid prefix, with a warning to reconcile missing tasks and ID gaps before creating new work. Recovery does not reconstruct omitted history or certify the allocator as complete.
+- Keep a failed recovery checkpoint pending across reload and tree navigation, including selecting the exact failed checkpoint before its pending marker, when native append advances the branch before its file write fails. Best-effort format 9 snapshots retain the unchanged prefix and identify only their failed parent checkpoint; off-branch task state is never replayed. Preappend rejections leave the branch unchanged, and secondary write errors never replace the original failure.
+
+### Added
+
+- Allow a numeric `id` on add to skip forward monotonically for manual missing-item reconciliation without recreating deliberately deleted IDs. Reject lower, reused, invalid, or exhausted IDs; preserve batch refs and atomic rollback.
+
+### Changed
+
+- Write format 8 mutation logs with every addition's assigned numeric ID, including default allocation, for stable replay. Continue reading formats 1–7 with their original semantics. Sessions written by this version require 0.10.3 or later; do not downgrade readers.
+- Distribute 0.10.3 through Git/GitHub only; no npm publication.
+
 ## [0.10.2] - 2026-10-09
 
 ### Fixed
