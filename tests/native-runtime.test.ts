@@ -169,7 +169,7 @@ test("native persist failure preserves branch projection and recovery admission 
   });
   try {
     session = await f.start(f.createManager());
-    await f.prompt({ action: "add", text: "Retained" });
+    const retained = await f.prompt({ action: "add", text: "Retained" });
     const failure = await f.prompt({ action: "add", text: "Persist failure" }, true);
     assert.match(failure.text, /EISDIR/);
     const expected = "TODO: 0 active, 2 pending, 0 completed\n- #1 Retained\n- #2 Persist failure";
@@ -211,6 +211,15 @@ test("native persist failure preserves branch projection and recovery admission 
     ] }, true);
     assert.match(rejectedAfterTree.text, /no mutation applied/);
     assert.equal(session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state")?.id, pending.id);
+    assert.equal((await session.navigateTree(checkpoint.id, { summarize: false })).cancelled, false);
+    const rejectedAtCheckpoint = await f.prompt({ action: "add", text: "Still unsafe at failed checkpoint" }, true);
+    assert.match(rejectedAtCheckpoint.text, /no mutation applied/);
+    assert.equal(session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state")?.id, checkpoint.id);
+    assert.equal((await session.navigateTree(retained.entryId, { summarize: false })).cancelled, false);
+    assert.equal((await f.prompt({ action: "list" })).text, "TODO: 0 active, 1 pending, 0 completed\n- #1 Retained");
+    assert.match((await f.prompt({ action: "add", text: "Unrelated branch" })).text, /Added #2: Unrelated branch/);
+    assert.equal((await session.navigateTree(checkpoint.id, { summarize: false })).cancelled, false);
+    assert.match((await f.prompt({ action: "add", text: "Still unsafe after unrelated branch" }, true)).text, /no mutation applied/);
     const recovered = await f.prompt({ action: "list" });
     assert.match(recovered.text, /Warning: Todo history was corrupt[\s\S]*Next ID 4[\s\S]*Manually reconcile/);
     assert.deepEqual(recovered.details, recoveryDetails, "neither the corrupt partial add nor rejected mutation consumes IDs or changes state");

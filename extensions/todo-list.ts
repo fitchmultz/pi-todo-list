@@ -88,12 +88,19 @@ const NOT_TODO_RESULT = Symbol("not-todo-result");
 const NO_TODO_CHANGE = Symbol("no-todo-change");
 type BranchEntry = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[number];
 
+function customCommit(entry: BranchEntry | undefined): { toolCallId: string; details: unknown } | undefined {
+  if (entry?.type !== "custom" || entry.customType !== TODO_STATE_TYPE) return undefined;
+  const data = entry.data as { toolCallId?: unknown; details?: unknown } | undefined;
+  if (!data || typeof data !== "object" || !hasExactKeys(data, ["toolCallId", "details"])
+    || typeof data.toolCallId !== "string") return undefined;
+  return { toolCallId: data.toolCallId, details: data.details };
+}
+
 function entryDetails(entry: BranchEntry, pendingResults: Map<string, number>): unknown {
   if (entry.type === "message" && entry.message.role === "assistant") pendingResults.clear();
   if (entry.type === "custom" && entry.customType === TODO_STATE_TYPE) {
-    const data = entry.data as { toolCallId?: unknown; details?: unknown } | undefined;
-    if (!data || typeof data !== "object" || !hasExactKeys(data, ["toolCallId", "details"])
-      || typeof data.toolCallId !== "string") return undefined;
+    const data = customCommit(entry);
+    if (!data) return undefined;
     pendingResults.set(data.toolCallId, (pendingResults.get(data.toolCallId) ?? 0) + 1);
     return data.details;
   }
@@ -192,7 +199,9 @@ function replayLog(state: TodoState, log: MutationDetails): void {
   }
 }
 
-function restore(branch: BranchEntry[], endIndex = branch.length): { state: TodoState; recoveryNeeded: boolean } {
+function restore(
+  branch: BranchEntry[], endIndex = branch.length, failedCheckpoint?: (entry: BranchEntry) => boolean,
+): { state: TodoState; recoveryNeeded: boolean } {
   const pendingResults = new Map<string, number>();
   const history = branch.slice(0, endIndex).map((entry) => entryDetails(entry, pendingResults));
   let restored = emptyState();
@@ -208,7 +217,8 @@ function restore(branch: BranchEntry[], endIndex = branch.length): { state: Todo
       continue;
     }
     restored = checkpoint;
-    restoreStopped ||= details.version === PENDING_RECOVERY_VERSION;
+    restoreStopped ||= details.version === PENDING_RECOVERY_VERSION
+      || (details.version === RECOVERY_VERSION && failedCheckpoint?.(branch[index]!) === true);
     checkpointIndex = index;
     break;
   }
@@ -248,6 +258,29 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   let boundaryContext: { id: string; message: ContextWithSystemEvent["messages"][number] | null } | undefined;
   let observedLeaf: string | null = null;
   let compaction: BranchEntry | undefined;
+  let failedCheckpoints: Set<string> | undefined;
+  let failedIndexSession: string | undefined;
+
+  const failedRecoveryCheckpoints = (ctx: ExtensionContext): Set<string> => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    if (failedCheckpoints && failedIndexSession === sessionId) return failedCheckpoints;
+    const failed = new Set<string>();
+    // Off-branch markers classify append failures only; task state still follows getBranch().
+    for (const entry of ctx.sessionManager.getEntries()) {
+      const marker = customCommit(entry);
+      if (!marker || !entry.parentId || !isSnapshot(marker.details) || marker.details.version !== PENDING_RECOVERY_VERSION) continue;
+      const parent = ctx.sessionManager.getEntry(entry.parentId);
+      const checkpoint = customCommit(parent);
+      if (!parent || !checkpoint || checkpoint.toolCallId !== marker.toolCallId
+        || !isSnapshot(checkpoint.details) || checkpoint.details.version !== RECOVERY_VERSION) continue;
+      const pendingState = validatedSnapshot(marker.details);
+      const checkpointState = validatedSnapshot(checkpoint.details);
+      if (pendingState && checkpointState && JSON.stringify(pendingState) === JSON.stringify(checkpointState)) failed.add(parent.id);
+    }
+    failedIndexSession = sessionId;
+    failedCheckpoints = failed;
+    return failed;
+  };
 
   const latestCompaction = (ctx: ExtensionContext): BranchEntry | undefined => {
     const leaf = ctx.sessionManager.getLeafId();
@@ -317,7 +350,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     boundaryContext = undefined;
     observedLeaf = null;
     compaction = undefined;
-    const restored = restore(ctx.sessionManager.getBranch());
+    const restored = restore(ctx.sessionManager.getBranch(), undefined,
+      (entry) => failedRecoveryCheckpoints(ctx).has(entry.id));
     state = restored.state;
     recoveryNeeded = restored.recoveryNeeded;
     if (recoveryNeeded && ctx.hasUI) ctx.ui.notify("Todo restore stopped at corrupt session data; later changes were not replayed. Mutations are blocked until a successful todo_list list read checkpoints the valid prefix; manual reconciliation is then required.", "warning");
@@ -326,7 +360,11 @@ export default function todoListExtension(pi: ExtensionAPI): void {
 
   const hasTodoHistory = (): boolean => state.items.length > 0 || state.nextId > 1;
 
-  pi.on("session_start", (_event, ctx) => rehydrate(ctx));
+  pi.on("session_start", (_event, ctx) => {
+    failedCheckpoints = undefined;
+    failedIndexSession = undefined;
+    rehydrate(ctx);
+  });
   pi.on("session_tree", (_event, ctx) => rehydrate(ctx));
 
   pi.on("context_with_system", (event, ctx) => {
@@ -456,6 +494,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
               if (ctx.sessionManager.getLeafId() !== previousLeaf
                 && last?.type === "custom" && last.customType === TODO_STATE_TYPE
                 && JSON.stringify(last.data) === JSON.stringify(commit)) {
+                failedRecoveryCheckpoints(ctx).add(last.id);
                 // Keep the failed read unacknowledged across reload/tree navigation.
                 pi.appendEntry(TODO_STATE_TYPE, {
                   toolCallId, details: { version: PENDING_RECOVERY_VERSION, state: cloneState(state) },

@@ -387,6 +387,8 @@ function createExtensionHarness(sessionManager?: SessionManager) {
       notify(message: string) { notifications.push(message); },
     },
     sessionManager: sessionManager ?? {
+      getSessionId: () => "fixture-session",
+      getEntries: () => [...branch],
       getBranch: () => branch,
       getLeafId: () => branch.length ? branch.at(-1)?.id ?? `fixture-${branch.length}` : null,
       getEntry: (id: string) => {
