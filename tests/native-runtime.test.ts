@@ -222,7 +222,24 @@ test("native nested Todo commits survive script failure, reload, tree navigation
       toolCallId: "after-corruption", details: { version: 7, operations: [{ action: "add", text: "Must not cross gap" }] },
     });
     await session.reload();
+    const commitsBefore = session.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "todo-list-state");
+    for (const params of [
+      { action: "add", text: "Unsafe pending addition" },
+      { action: "batch", operations: [{ action: "complete", id: 1 }, { action: "add", text: "Unsafe pending batch" }] },
+    ]) {
+      const rejected = await f.prompt(params, true);
+      assert.match(rejected.text, /no mutation applied/);
+      assert.deepEqual(session.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "todo-list-state"), commitsBefore);
+    }
     const recovered = await f.script('return await tools.todo_list({action:"list"})');
+    const checkpoint = session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-list-state");
+    assert(checkpoint?.type === "custom");
+    assert.deepEqual((checkpoint.data as { details: unknown }).details, { version: 6, state: { nextId: 5, items: [
+      { id: 1, text: "Original task", status: "pending" },
+      { id: 2, text: "Nested parent", status: "paused", link: "/parent.md" },
+      { id: 3, text: "Nested child", status: "in_progress", parentId: 2, link: "/child.md" },
+      { id: 4, text: "After resume", status: "completed" },
+    ] } });
     assert.match(recovered.text, /Warning: Todo history was corrupt/);
     assert.match(recovered.text, /Nested child/);
     assert.doesNotMatch(recovered.text, /Partial corrupt batch|Must not cross gap/);
@@ -290,7 +307,7 @@ test("native null link placeholders work without changing explicit link clearing
       action: "complete", id: 1, text: null, link: null, status: null,
       parentId: null, operations: null, offset: null, limit: null,
     });
-    assert.deepEqual(completed.details, { version: 7, operations: [{ action: "complete", id: 1 }] });
+    assert.deepEqual(completed.details, { version: 8, operations: [{ action: "complete", id: 1 }] });
     assert.equal((await f.prompt({ action: "list", id: 1 })).text,
       "#1 Linked task\nStatus: completed\nDetails: /notes/task.md");
 
@@ -301,7 +318,7 @@ test("native null link placeholders work without changing explicit link clearing
     const batch = await f.prompt({
       action: "batch", operations: operations.map((operation) => ({ ...operation, link: null })),
     });
-    assert.deepEqual(batch.details, { version: 7, operations });
+    assert.deepEqual(batch.details, { version: 8, operations });
     await session.reload();
     assert.equal((await f.prompt({ action: "list", id: 1 })).text,
       "#1 Linked task\nStatus: paused\nDetails: /notes/task.md");
@@ -346,22 +363,25 @@ test("native sibling results preserve reference commits and exact branch boundar
     ] });
     const siblings = await f.prompt([
       { action: "batch", operations: [
-        { action: "add", text: "Paused parent", status: "paused", ref: "001", link: "/notes/parent.md" },
+        { action: "add", id: 12, text: "Paused parent", status: "paused", ref: "001", link: "/notes/parent.md" },
         { action: "add", text: "Active child", status: "in_progress", parentId: "001" },
       ] },
       { action: "add", text: "Later sibling", status: "completed" },
     ]);
     const [first, second] = siblings.results;
     assert(first && second);
-    assert.match(first.text, /Added #2: Paused parent/);
-    assert.match(second.text, /Added #4: Later sibling/);
+    assert.match(first.text, /Added #12: Paused parent/);
+    assert.match(second.text, /Added #14: Later sibling/);
     const persisted = JSON.stringify(first.details);
-    assert.match(persisted, /"parentId":2/);
+    assert.deepEqual(first.details, { version: 8, operations: [
+      { action: "add", id: 12, text: "Paused parent", status: "paused", link: "/notes/parent.md" },
+      { action: "add", id: 13, text: "Active child", status: "in_progress", parentId: 12 },
+    ] });
     assert.doesNotMatch(persisted, /"ref"|"parentId":"001"/);
-    assert.match((await f.prompt({ action: "list", id: 4 })).text, /Status: completed/);
+    assert.match((await f.prompt({ action: "list", id: 14 })).text, /Status: completed/);
 
     assert.equal((await session.navigateTree(first.entryId, { summarize: false })).cancelled, false);
-    assert.match((await f.prompt({ action: "add", text: "Branch allocation" })).text, /Added #4: Branch allocation/);
+    assert.match((await f.prompt({ action: "add", text: "Branch allocation" })).text, /Added #14: Branch allocation/);
     await session.reload();
     const file = session.sessionFile;
     assert(file);
@@ -371,9 +391,9 @@ test("native sibling results preserve reference commits and exact branch boundar
     const restored = await f.prompt({ action: "list" });
     assert.match(restored.text, /1 active, 1 pending, 1 paused, 0 completed/);
     assert.doesNotMatch(restored.text, /Later sibling/);
-    assert.equal((await f.prompt({ action: "list", id: 3 })).text,
-      "#3 Active child\nStatus: in progress\nParent: #2");
-    assert.match((await f.prompt({ action: "list", id: 2 })).text, /Status: paused\nDetails: \/notes\/parent.md/);
+    assert.equal((await f.prompt({ action: "list", id: 13 })).text,
+      "#13 Active child\nStatus: in progress\nParent: #12");
+    assert.match((await f.prompt({ action: "list", id: 12 })).text, /Status: paused\nDetails: \/notes\/parent.md/);
   } finally { await f.cleanup(); }
 });
 

@@ -44,7 +44,7 @@ export const TODO_STATUSES = ["pending", "in_progress", "paused", "completed"] a
 export const TODO_REF_LIMIT = 64;
 export const BATCH_OPERATION_LIMIT = 100;
 const MUTATION_FIELDS: Record<TodoMutationAction, readonly string[]> = {
-  add: ["text", "parentId", "link", "status"],
+  add: ["id", "text", "parentId", "link", "status"],
   update: ["id", "text", "link"],
   move: ["id", "parentId"],
   start: ["id"],
@@ -184,13 +184,17 @@ function reopenCompleted(ancestors: TodoItem[]): void {
   for (const ancestor of ancestors) if (ancestor.status === "completed") ancestor.status = "pending";
 }
 
-export function addTodo(state: TodoState, text: string, parentId?: number, link?: string | null, status: TodoStatus = "pending"): TodoItem {
+export function addTodo(state: TodoState, text: string, parentId?: number, link?: string | null, status: TodoStatus = "pending", id = state.nextId): TodoItem {
   if (!TODO_STATUSES.includes(status)) throw new Error("Invalid todo status");
   const value = concise(text);
   const detailLink = normalizeLink(link);
   if (parentId !== undefined && item(state, parentId).status === "completed") throw new Error("Cannot add under a completed todo");
   if (!Number.isSafeInteger(state.nextId) || state.nextId < 1 || state.nextId >= Number.MAX_SAFE_INTEGER) throw new Error("Todo id limit reached");
-  const added = { id: state.nextId++, text: value, status, ...(parentId === undefined ? {} : { parentId }), ...(detailLink === undefined ? {} : { link: detailLink }) };
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error("id must be a positive safe integer");
+  if (id >= Number.MAX_SAFE_INTEGER) throw new Error("Todo id limit reached");
+  if (id < state.nextId) throw new Error(`Add id must be at least the next ID (${state.nextId}); lower IDs cannot be reused`);
+  const added = { id, text: value, status, ...(parentId === undefined ? {} : { parentId }), ...(detailLink === undefined ? {} : { link: detailLink }) };
+  state.nextId = id + 1;
   state.items.push(added);
   return added;
 }
@@ -290,13 +294,14 @@ export function normalizeTodoMutation(value: unknown, refs?: ReadonlyMap<string,
   for (const key of ["id", "parentId"] as const) {
     const id = input[key];
     if (id === undefined) continue;
-    if (typeof id === "string" && refs) {
+    const allowRef = refs && !(action === "add" && key === "id");
+    if (typeof id === "string" && allowRef) {
       validateRef(id);
       const resolved = refs.get(id);
       if (resolved === undefined) throw new Error(`Unknown or forward batch ref: ${id}`);
       operation[key] = resolved;
     } else {
-      if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 1) throw new Error(`${key} must be a positive safe integer${refs ? " or an earlier batch ref" : ""}`);
+      if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 1) throw new Error(`${key} must be a positive safe integer${allowRef ? " or an earlier batch ref" : ""}`);
       operation[key] = id;
     }
   }
@@ -325,7 +330,8 @@ function requiredText(operation: TodoMutation): string {
 export function applyTodoMutation(state: TodoState, operation: TodoMutation, withReceipt = true): string {
   switch (operation.action) {
     case "add": {
-      const todo = addTodo(state, requiredText(operation), operation.parentId, operation.link, operation.status);
+      const todo = addTodo(state, requiredText(operation), operation.parentId, operation.link, operation.status, operation.id);
+      operation.id = todo.id;
       return withReceipt ? `Added #${todo.id}: ${todo.text}` : "";
     }
     case "update": {
@@ -383,7 +389,7 @@ export function applyTodoBatch(state: TodoState, operations: TodoBatchMutation[]
   for (const [index, operation] of operations.entries()) {
     try {
       const normalized = normalizeTodoMutation(operation, refs);
-      const addedId = draft.nextId;
+      const addedId = normalized.id ?? draft.nextId;
       messages.push(applyTodoMutation(draft, normalized));
       canonical.push(normalized);
       if (operation.ref !== undefined) refs.set(operation.ref, addedId);
