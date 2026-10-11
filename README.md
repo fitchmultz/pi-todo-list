@@ -1,81 +1,77 @@
 # Pi Todo List
 
-Pi Todo List gives your [Pi](https://github.com/earendil-works/pi) agent a nested todo list for multi-step work. You can check what's left with `/todos` and return to the same list when you resume a session.
+Pi Todo List gives your [Pi](https://github.com/earendil-works/pi) agent a nested todo list. Use it to check task progress from the Pi terminal.
 
-![A request flows into a nested todo list in Pi. You can view it with /todos; changes are saved in Pi's session journal and restored when you resume, fork, or compact the session.](.github/readme/session-todos.png)
+![A Pi request updates a nested todo list. The /todos command shows the todo list. Pi saves changes in its session journal.](.github/readme/session-todos.png)
 
-*Your todo list is saved in Pi's session journal and restored with the session.*
+*Pi saves the todo list on the selected session branch.*
 
 ## Install and start
 
-You'll need Pi 1.0.0 or later (official releases or the maintained fork) and Node.js 24 or later.
+Use Pi 1.0.0 or later and Node.js 24 or later. Official Pi releases and the maintained fork both support this extension.
 
 ```bash
 pi install git:github.com/fitchmultz/pi-todo-list
 pi
 ```
 
-Ask Pi to use the list:
+Ask Pi to track a task:
 
-> Track this change with todos: investigate the bug, implement a fix, and verify it.
+> Use todo_list to track this task and its subtasks.
 
-Type `/todos` to see the open work or `/todos show` to keep a small progress widget visible. The [terminal controls](#check-progress) are below; the [tool reference](docs/reference.md) covers batches and other details.
+Type `/todos` to check progress. Read the [tool reference](docs/reference.md) for actions and batch examples.
 
-## Working with the list
+## Terminal controls
 
-Ask Pi to break a task into subtasks. Each item can be pending, in progress, paused, or completed. Pi updates them through its `todo_list` tool as it works.
-
-You can attach a URL or note/file path to an item without putting all the detail in its title. The list shows `[details]`; `/todos <id>` reveals the link. The extension stores the link without opening it.
-
-## Check progress
-
-These commands run in Pi's interactive terminal:
-
-| Command | What you see |
+| Command | Result |
 | --- | --- |
-| `/todos` | The first page of open items, plus status counts |
-| `/todos 3` | Item #3's status, parent, and detail link, even if completed |
-| `/todos all` | Open and completed items, up to 100 rows |
-| `/todos show` | A widget showing up to eight open items |
+| `/todos` | Open todo items and status counts, up to 100 rows |
+| `/todos 3` | Item #3's status, parent, and detail link, even when completed |
+| `/todos all` | Open and completed todo items, up to 100 rows |
+| `/todos show` | Show the widget, with up to eight open todo items |
 | `/todos hide` | Hide the widget |
-| `/todos toggle` | Switch the widget on or off |
+| `/todos toggle` | Switch widget visibility |
 
-The widget starts hidden. The footer shows active and pending counts, plus paused work when present. To start each Pi process with the widget visible:
+Pi hides the widget at startup. For open todo items, the footer shows active and pending counts. It also shows paused counts when present.
+
+Run Pi with this setting to show the widget at startup:
 
 ```bash
 PI_TODO_WIDGET=show pi
 ```
 
-To change an item, tell the agent what you want:
+Ask Pi to change a todo item:
 
 > Pause item #3 until the API credentials are available.
->
-> Reopen item #2 and its subtasks.
 
-The agent's ordinary list omits completed items. Use `/todos all` to find an old item's ID and include that ID in your request.
+Use `/todos all` to find a completed item's ID. Include that ID when you ask Pi to reopen it.
 
-## How the list stays with your work
+## Todo items and sessions
 
-Todos live in Pi's native session journal, on the selected branch. A new session starts with an empty list. Resuming a saved session brings its list back, and forking or navigating the session tree follows the branch you select. The list also survives context compaction, even when Pi discards all previous provider context.
+Each todo item can be pending, in progress, paused, or completed. Pi also completes or removes subtasks when you complete or remove their parent item.
 
-Completing or removing a parent affects all its descendants. Reopening it returns the whole subtree to pending. Starting, pausing, or reopening a child also reopens any completed ancestors. Completed work stays in the journal and can be looked up until you remove it or clear completed items; nothing is automatically deleted.
+A todo item can link to a URL or note/file path. The todo list shows `[details]`; `/todos <id>` shows the link. The extension does not open the link.
 
-Use extension version 0.10.3 or later for sessions written by 0.10.3. Older versions can stop at an unfamiliar journal entry and save an incomplete list. See [journal compatibility](docs/reference.md#journal-compatibility) before downgrading.
+Pi saves todo items in its native session journal. Pi restores them when you resume, fork, or select a session branch. Context compaction preserves the todo list. A new session starts with an empty todo list.
 
-If you see a corruption or persistence warning, inspect the list before retrying a change. A successful recovery read saves only the valid prefix of the history. You'll still need to reconcile missing tasks and ID gaps using the [recovery guide](docs/reference.md#manual-reconciliation-after-a-corruption-warning) before creating new work.
+## Warnings
 
-## Try it locally or contribute
+Older extension versions can save an incomplete todo list. Use version 0.10.3 or later when you open sessions from version 0.10.3. Read [journal compatibility](docs/reference.md#journal-compatibility) before a downgrade.
 
-From a checkout, load it for one invocation:
+Corrupt history can leave an incomplete todo list. Follow the [recovery guide](docs/reference.md#manual-reconciliation-after-a-corruption-warning) before you add todo items after a corruption warning.
+
+Pi can change the current branch before a save fails. Check the todo list before you retry a failed change.
+
+## Details and development
+
+From a checkout, load the extension for one Pi session:
 
 ```bash
 pi -e ./extensions/todo-list.ts
 ```
 
-Or install a local checkout with `pi install /absolute/path/to/pi-todo-list`.
-
-- [Tool and persistence reference](docs/reference.md): actions, batches, recovery, and journal formats
-- [Development guide](docs/development.md): setup, tests, and compatibility checks
+- [Tool reference](docs/reference.md): actions, batches, detail links, recovery, and journal formats
+- [Development guide](docs/development.md): local installation, tests, and compatibility checks
 - [Changelog](CHANGELOG.md): release history
 - [Issues](https://github.com/fitchmultz/pi-todo-list/issues): bugs and feature requests
 
