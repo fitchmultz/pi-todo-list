@@ -86,11 +86,3 @@ A successful recovery read permits subsequent mutations; it does **not** certify
 ## Journal compatibility
 
 Do not open sessions written by this version with an older extension: format 8 mutations and format 9 pending-recovery snapshots require 0.10.3 or later. Older readers can stop at an unfamiliar entry and checkpoint an incomplete list; releases before 0.10.2 also cannot replay custom commits, including nested mutations and recovery checkpoints. Existing journals remain readable by this version. Version 0.10.3 is distributed through Git/GitHub only, without an npm publication.
-
-For a fixed installation of that journal-format baseline:
-
-```bash
-pi install git:github.com/fitchmultz/pi-todo-list@v0.10.3
-```
-
-A tag-pinned installation stays at that tag. The [README's unpinned source](../README.md#install-and-start) follows the repository's default branch when updated.
