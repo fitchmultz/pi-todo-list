@@ -4,8 +4,6 @@ Pi Todo List gives your [Pi](https://github.com/earendil-works/pi) agent a neste
 
 ![A Pi request updates a nested todo list. The /todos command shows the todo list. Pi saves changes in its session journal.](.github/readme/session-todos.png)
 
-*Pi saves the todo list on the selected session branch.*
-
 ## Install and start
 
 Use Pi 1.0.0 or later and Node.js 24 or later. Official Pi releases and the maintained fork both support this extension.
