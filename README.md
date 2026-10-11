@@ -1,119 +1,84 @@
-# @fitchmultz/pi-todo-list
+# Pi Todo List
 
-A small native Pi extension that gives agents a persistent, nested todo list.
+Pi Todo List gives your [Pi](https://github.com/earendil-works/pi) agent a nested todo list for multi-step work. You can check what's left with `/todos` and return to the same list when you resume a session.
 
-- Agent-callable `todo_list` tool with pending, in-progress, paused, and completed states
-- Short action titles with optional links to detailed notes, plans, or evidence
-- Create work in any state and reference newly added items within an atomic batch
-- Start, pause, complete, reopen, update, move, remove, and atomic batch actions
-- Nested items with recursive completion and deletion
-- Paginated open-work listing plus an opt-in TUI widget and `/todos` controls
-- Session-local, branch-aware persistence through native custom entries, including nested tool calls
-- Survives compaction (including retain-none rollover), resume, fork, and tree navigation
+![A request flows into a nested todo list in Pi. You can view it with /todos; changes are saved in Pi's session journal and restored when you resume, fork, or compact the session.](.github/readme/session-todos.png)
 
-## Requirements
+*Your todo list is saved in Pi's session journal and restored with the session.*
 
-- Pi 1.0.0 or later (official releases and the maintained fork)
-- Node.js 24 or later
+## Install and start
 
-## Install
+You'll need Pi 1.0.0 or later (official releases or the maintained fork) and Node.js 24 or later.
 
 ```bash
-pi install git:github.com/fitchmultz/pi-todo-list@v0.10.3
+pi install git:github.com/fitchmultz/pi-todo-list
+pi
 ```
 
-For local development:
+Ask Pi to use the list:
+
+> Track this change with todos: investigate the bug, implement a fix, and verify it.
+
+Type `/todos` to see the open work or `/todos show` to keep a small progress widget visible. The [terminal controls](#check-progress) are below; the [tool reference](docs/reference.md) covers batches and other details.
+
+## Working with the list
+
+Ask Pi to break a task into subtasks. Each item can be pending, in progress, paused, or completed. Pi updates them through its `todo_list` tool as it works.
+
+You can attach a URL or note/file path to an item without putting all the detail in its title. The list shows `[details]`; `/todos <id>` reveals the link. The extension stores the link without opening it.
+
+## Check progress
+
+These commands run in Pi's interactive terminal:
+
+| Command | What you see |
+| --- | --- |
+| `/todos` | The first page of open items, plus status counts |
+| `/todos 3` | Item #3's status, parent, and detail link, even if completed |
+| `/todos all` | Open and completed items, up to 100 rows |
+| `/todos show` | A widget showing up to eight open items |
+| `/todos hide` | Hide the widget |
+| `/todos toggle` | Switch the widget on or off |
+
+The widget starts hidden. The footer shows active and pending counts, plus paused work when present. To start each Pi process with the widget visible:
 
 ```bash
-pi install /absolute/path/to/pi-todo-list
+PI_TODO_WIDGET=show pi
 ```
 
-For a one-off run:
+To change an item, tell the agent what you want:
+
+> Pause item #3 until the API credentials are available.
+>
+> Reopen item #2 and its subtasks.
+
+The agent's ordinary list omits completed items. Use `/todos all` to find an old item's ID and include that ID in your request.
+
+## How the list stays with your work
+
+Todos live in Pi's native session journal, on the selected branch. A new session starts with an empty list. Resuming a saved session brings its list back, and forking or navigating the session tree follows the branch you select. The list also survives context compaction, even when Pi discards all previous provider context.
+
+Completing or removing a parent affects all its descendants. Reopening it returns the whole subtree to pending. Starting, pausing, or reopening a child also reopens any completed ancestors. Completed work stays in the journal and can be looked up until you remove it or clear completed items; nothing is automatically deleted.
+
+Use extension version 0.10.3 or later for sessions written by 0.10.3. Older versions can stop at an unfamiliar journal entry and save an incomplete list. See [journal compatibility](docs/reference.md#journal-compatibility) before downgrading.
+
+If you see a corruption or persistence warning, inspect the list before retrying a change. A successful recovery read saves only the valid prefix of the history. You'll still need to reconcile missing tasks and ID gaps using the [recovery guide](docs/reference.md#manual-reconciliation-after-a-corruption-warning) before creating new work.
+
+## Try it locally or contribute
+
+From a checkout, load it for one invocation:
 
 ```bash
 pi -e ./extensions/todo-list.ts
 ```
 
-Then ask the agent to track the work. It will list todos when starting or resuming and add or start items before their first work call in the same tool batch. Updates can accompany other tool calls when their status is already known, but completion must wait until the agent has observed successful verification from an earlier batch. After the final check, a separate completion call is appropriate if no other work remains; failed or unverified work stays open. It leaves nothing open when it reports the work finished. Related changes can be sent as one ordered `batch` of up to 100 operations; the whole batch rolls back if any operation fails.
+Or install a local checkout with `pi install /absolute/path/to/pi-todo-list`.
 
-`list` without an `id` returns up to 100 open items and counts the completed ones in its header, matching the widget and the post-compaction summary. Use its zero-based `offset` and optional `limit` to continue through larger lists.
+- [Tool and persistence reference](docs/reference.md): actions, batches, recovery, and journal formats
+- [Development guide](docs/development.md): setup, tests, and compatibility checks
+- [Changelog](CHANGELOG.md): release history
+- [Issues](https://github.com/fitchmultz/pi-todo-list/issues): bugs and feature requests
 
-`clear_completed` returns a one-time receipt with every removed item's ID, full text, detail link when present, and parent ID when nested, ordered by ID. This also applies inside a successful batch. Receipts are not paginated or truncated; ordinary listing and context still omit completed items.
+## License
 
-`/todos <id>` shows one item's status, parent, and detail link, including completed items. `/todos` shows the first page of open items and `/todos all` adds the completed ones with their text, up to 100 rows, since a human reading the terminal pays no tokens for them. The agent's default list omits completed items, so pass an id along from `/todos all` when you want one reopened and the agent no longer has it in context. `/todos toggle`, `/todos show`, and `/todos hide` control the widget. The widget starts hidden, and the footer status reports active, pending, and nonzero paused counts. Set `PI_TODO_WIDGET=show` to start it visible instead.
-
-## Create and start work together
-
-Set `status` on `add` to `pending`, `in_progress`, `paused`, or `completed`. Omit it to create pending work. This works for standalone additions and additions inside a batch.
-
-Within a batch, an `add` can declare a `ref` label. Later operations can use that label in `id` or `parentId` without guessing the generated ID:
-
-```json
-{
-  "action": "batch",
-  "operations": [
-    { "action": "add", "text": "Ship change", "status": "in_progress", "ref": "ship" },
-    { "action": "add", "text": "Verify release", "parentId": "ship", "ref": "verify" },
-    { "action": "update", "id": "verify", "link": "notes/release.md" }
-  ]
-}
-```
-
-An `add` may also set a numeric `id` at least the next available ID, for manually recreating a known missing item while skipping deliberately deleted IDs. Omit `id` for normal sequential allocation. Skipping forward permanently leaves the gap unused: later additions cannot use IDs below the new next ID, even if those items were removed. Add IDs cannot be batch ref labels; its `parentId` and later operations can still use refs. IDs must be positive safe integers below `Number.MAX_SAFE_INTEGER`, leaving a safe next ID. All validation and batch rollback rules still apply.
-
-Labels are case-sensitive, 1–64 characters, and cannot contain control characters or leading/trailing whitespace. They are unique within the batch and refer only to earlier additions in that batch. A duplicate, unknown, forward, or non-add reference fails the entire batch without consuming IDs. Returned IDs remain numbers; use those in later calls. Persisted mutation details contain resolved numeric IDs, so restoring the list does not depend on temporary labels.
-
-## Keep current work readable
-
-Use a short action title such as “Verify release”, not a title packed with commit hashes or test output. Set `link` on `add` or `update` to a URL or note/file path for those details. An update may change the title, the link, or both; `link: null` clears the link. Omitted fields stay unchanged. Other actions ignore `link: null`.
-
-Lists, the widget, and recovery summaries show `[details]` rather than the full link. Call `todo_list` with `action: "list"` and `id`, or use `/todos <id>`, to retrieve it. The extension stores the reference without reading or opening it. Relative file paths are relative to the session's working directory; prefer absolute paths across checkouts and worktrees. A notes tool may store notes under a different root.
-
-When using notes, maintain one brief current summary: goal, current state, next step, blockers, and evidence links. Replace outdated state instead of appending a diary. Update todo titles and statuses when the plan changes, and remove work that no longer applies. Nothing is automatically deleted.
-
-`pause` keeps an item open in a distinct paused state, shown as `⏸` rather than pending's `-` (or `○` in the widget). Use `start` to resume it. `reopen` returns an item and its descendants to pending; completion still includes descendants. Starting, pausing, or reopening a nested item reopens completed ancestors.
-
-## Caching
-
-The tool definition and system-prompt guidance are static. Mutations return only the change and status counts. Ordinary requests add no todo context. After compaction, including retain-none rollover, the extension injects one recovery summary with at most five active, five pending, and five paused titles for the retry or next request, including automatic compaction between tool turns. The snapshot is labeled as a recovery snapshot: later tool results carry current state without rewriting the provider-cacheable prefix.
-
-Ordinary requests cache the latest compaction (including its absence), inspecting only new ancestry entries. A new retain-none boundary replays the selected branch once to freeze its snapshot. Session/tree changes reset this lookup; no independent state journal or arbitrary history cap is introduced.
-
-Retain-none recovery reaches the first continued request in the same run. It is a request-only snapshot of the list at that boundary, not another journal entry, and stays byte-stable across later mutations and reloads.
-
-Recovery append-failure metadata is indexed lazily once per runtime/session when a format 6 checkpoint needs classification, and updated for the extension's own failures. Ordinary tools, requests, and widget updates do not scan all session entries.
-
-## State behavior
-
-Successful mutations persist as compact `todo-list-state` custom entries in the native session journal, independently of how the tool was called. This includes nested calls from codemode and calls committed before a script fails. Ordinary reads add no custom entry. Tool-result `details` remain available for callers and older histories; replay uses each custom commit once and ignores only its matching transport result within that assistant turn. Tool-call IDs may be empty or reused in later turns. Resume and tree navigation replay only the selected branch, using legacy snapshots and recovery checkpoints when present. Commit data contains the tool-call ID and format 8 mutation details, a format 6 successful recovery checkpoint, or a format 9 pending-recovery snapshot after a partial checkpoint write failure. Mutation logs store the exact assigned numeric ID of every addition (including default allocation), resolved references, and initial statuses. Formats 1–7 remain readable with their original semantics, including implicit add allocation in formats 3, 5, and 7; format 7 still rejects add IDs. Older format 3 pause operations retain their original pending state; old snapshots cannot distinguish paused work from other pending items. Legacy context-window snapshot replay remains supported by the extension; current hosts use public compaction rather than native windows. Old-format journals must follow the host's conversion procedure rather than being resumed directly. If restore encounters corrupt history, it warns and preserves the contiguous valid prefix. All mutations, including batches, are rejected before changing state, consuming IDs, or appending a commit. Only a successful `todo_list` call with `action: "list"` writes a recovery checkpoint of that unchanged prefix; failed reads do not unblock mutations. The read warns that the checkpoint is incomplete and manual reconciliation is required. Original history is preserved. Validated committed mutations also survive restoration if another extension subsequently marks their tool result as an error; failed calls without a commit leave state unchanged. A rejection before native append leaves state and IDs unchanged. If the native session retains an in-memory entry before its disk write fails, Todo follows that current branch and rethrows the original persistence error. When that entry is a failed recovery read's checkpoint, Todo best-effort appends a validated format 9 snapshot of the same prefix so reload and tree navigation still require a successful warned list read. An error writing that pending snapshot never replaces the original error; preappend rejections add no marker. A validated pending snapshot also identifies its exact parent checkpoint as failed when tree navigation selects that parent without its descendants. Only failure metadata is consulted across branches; task state still comes exclusively from the selected branch. A later successful recovery read writes a different format 6 checkpoint and clears the pending boundary. This does not guarantee atomic disk persistence; inspect the current list before retrying a failed mutation, since the native branch may already contain it. This keeps session history linear without an extra database or project file. A new session starts with an empty list. Older nested calls whose results were never journaled require manual recovery from available evidence; the extension does not guess state from script text or lossy call metadata.
-
-### Manual reconciliation after a corruption warning
-
-A successful recovery read permits subsequent mutations; it does **not** certify that missing history has been recovered. The displayed next ID comes only from the valid prefix and may already belong to an omitted task. Before creating new work, compare against trusted task records, reconcile missing items and later changes through ordinary add/update/move/lifecycle operations, and preserve deliberately deleted IDs. Use explicit add IDs in increasing order to skip known gaps; batch refs use the actual assigned IDs. Do not guess missing state or infer a safe allocator from the largest visible ID. This is manual missing-only creation, not an import or reset API; IDs below the current next ID cannot be restored with add. Previously saved incomplete checkpoints cannot be detected or repaired automatically.
-
-Do not open sessions written by this version with an older extension: format 8 mutations and format 9 pending-recovery snapshots require 0.10.3 or later. Older readers can stop at an unfamiliar entry and checkpoint an incomplete list; releases before 0.10.2 also cannot replay custom commits, including nested mutations and recovery checkpoints. Existing journals remain readable by this version. Version 0.10.3 is distributed through Git/GitHub only, without an npm publication.
-
-## Development
-
-```bash
-npm ci --ignore-scripts
-npm run check:compat
-pi -e ./extensions/todo-list.ts --list-models
-```
-
-The development Pi cohort is official `1.0.0` (all eight Pi packages and host TypeBox `1.3.27`); the extension's development schema dependency is TypeBox `1.3.34`. Host dependencies and runtime peers are unchanged. No fork-only API is required.
-
-`check:compat` runs the state suite, native SDK lifecycle tests, typechecking, and a
-pack dry-run against the installed host. Native tests script only model output: Pi
-loads the extension, registers `todo_list` and `/todos`, executes and journals tools,
-navigates branches, resumes, and compacts.
-The retain-none test checks recovery after the public compaction boundary discards
-all prior provider context, without requiring retired native-window APIs.
-Use a disposable HOME/agent directory and no provider credentials.
-
-CI uses the shared [Pi compatibility automation](https://github.com/fitchmultz/.github)
-on Node 24 to resolve the latest stable official Pi version and maintained fork SHA
-once per run, then qualify those exact targets. The supported development Pi floor
-is qualified separately, not used as the latest official target. Each qualification
-runs `check:compat`, including a pack dry-run; a fresh production-only checkout must
-also load through the selected host's CLI without extension errors.
+[MIT](LICENSE) · Copyright © 2026 Mitch Fultz.

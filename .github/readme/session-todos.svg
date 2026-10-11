@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
+  <title id="title">Your todo list travels with your Pi session</title>
+  <desc id="desc">Ask Pi to track a task. The agent updates a nested todo list, which you can inspect with /todos. Changes are saved in the native Pi session journal; resuming, forking, or compacting the session restores the list on the selected branch.</desc>
+  <defs>
+    <linearGradient id="canvas" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#060A12"/>
+      <stop offset="0.52" stop-color="#0B1120"/>
+      <stop offset="1" stop-color="#080C16"/>
+    </linearGradient>
+    <radialGradient id="blueBloom" cx="0.18" cy="0.18" r="0.8">
+      <stop stop-color="#2563EB" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#2563EB" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="violetBloom" cx="0.82" cy="0.36" r="0.7">
+      <stop stop-color="#8B5CF6" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#8B5CF6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#172238" stop-opacity="0.96"/>
+      <stop offset="1" stop-color="#0E1525" stop-opacity="0.98"/>
+    </linearGradient>
+    <linearGradient id="focus" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#172554" stop-opacity="0.82"/>
+      <stop offset="1" stop-color="#312E81" stop-opacity="0.58"/>
+    </linearGradient>
+    <pattern id="dotGrid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#94A3B8" fill-opacity="0.08"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#02040A" flood-opacity="0.5"/>
+    </filter>
+    <marker id="arrowBlue" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1 11 6 1 11Z" fill="#60A5FA"/>
+    </marker>
+    <marker id="arrowViolet" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1 11 6 1 11Z" fill="#A78BFA"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1 11 6 1 11Z" fill="#4ADE80"/>
+    </marker>
+    <style>
+      .sans { font-family: Inter, ui-sans-serif, Arial, sans-serif; }
+      .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+      .heading { font: 650 30px Inter, ui-sans-serif, Arial, sans-serif; fill: #F8FAFC; }
+      .copy { font: 450 26px Inter, ui-sans-serif, Arial, sans-serif; fill: #B9C7DD; }
+      .eyebrow { font: 650 19px "JetBrains Mono", ui-monospace, monospace; letter-spacing: 1.3px; }
+      .connector { fill: none; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+  </defs>
+
+  <!-- Solid canvas and starter design tokens. -->
+  <rect width="1600" height="720" fill="url(#canvas)"/>
+  <rect width="1600" height="720" fill="url(#blueBloom)"/>
+  <rect width="1600" height="720" fill="url(#violetBloom)"/>
+  <rect width="1600" height="720" fill="url(#dotGrid)"/>
+  <text x="56" y="64" class="eyebrow" fill="#93C5FD">PI TODO LIST</text>
+  <text x="56" y="126" class="sans" font-size="48" font-weight="700" letter-spacing="-1" fill="#F8FAFC">Your plan travels with the session</text>
+
+  <!-- Reserved connector lanes: updates, view, save, and restore. -->
+  <path d="M356 263H424" class="connector" stroke="#60A5FA" marker-end="url(#arrowBlue)"/>
+  <path d="M1074 263H1140" class="connector" stroke="#4ADE80" marker-end="url(#arrowGreen)"/>
+  <path d="M1074 449H1140" class="connector" stroke="#A78BFA" marker-end="url(#arrowViolet)"/>
+  <path d="M356 449H424" class="connector" stroke="#60A5FA" marker-end="url(#arrowBlue)"/>
+  <path d="M1342 524V578Q1342 602 1318 602H230Q206 602 206 578V524" class="connector" stroke="#A78BFA" marker-end="url(#arrowViolet)"/>
+  <rect x="534" y="580" width="480" height="44" rx="22" fill="#0B1120" stroke="#443962"/>
+  <text x="774" y="610" text-anchor="middle" class="copy" fill="#D8B4FE">Restore the selected branch</text>
+
+  <!-- Human request and continuation. -->
+  <g filter="url(#shadow)">
+    <rect x="56" y="188" width="300" height="150" rx="24" fill="url(#glass)" stroke="#2A3851"/>
+    <rect x="56" y="188" width="5" height="150" rx="2.5" fill="#60A5FA"/>
+    <text x="84" y="236" class="heading">Ask Pi</text>
+    <text x="84" y="277" class="copy">“Track this change</text>
+    <text x="84" y="310" class="copy">with todos.”</text>
+
+    <rect x="56" y="374" width="300" height="150" rx="24" fill="url(#glass)" stroke="#2A3851"/>
+    <text x="84" y="422" class="heading">Pick up the work</text>
+    <text x="84" y="463" class="copy">Resume · fork</text>
+    <text x="84" y="496" class="copy">Compact context</text>
+  </g>
+
+  <!-- Dominant live list, with example state labels beyond color. -->
+  <g filter="url(#shadow)">
+    <rect x="424" y="188" width="650" height="336" rx="28" fill="url(#focus)" stroke="#6D7DFF" stroke-opacity="0.62"/>
+    <text x="458" y="229" class="eyebrow" fill="#C4B5FD">AGENT TOOL · todo_list</text>
+    <text x="458" y="280" class="sans" font-size="38" font-weight="700" fill="#F8FAFC">A list for this session</text>
+    <path d="M458 304H1040" stroke="#536399" stroke-opacity="0.65"/>
+
+    <rect x="458" y="328" width="124" height="34" rx="17" fill="#172554" stroke="#3B82F6" stroke-opacity="0.5"/>
+    <text x="520" y="352" text-anchor="middle" class="sans" font-size="23" fill="#BFDBFE">active</text>
+    <text x="602" y="352" class="copy" fill="#F8FAFC">#1 Fix the bug</text>
+    <path d="M594 372V402H622M594 402V450H622" fill="none" stroke="#6F7FA7" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="638" y="403" class="copy">#2 Investigate</text>
+    <text x="638" y="452" class="copy">#3 Verify the fix</text>
+    <text x="1012" y="403" text-anchor="end" class="sans" font-size="23" fill="#86EFAC">done</text>
+    <text x="1012" y="452" text-anchor="end" class="sans" font-size="23" fill="#B9C7DD">pending</text>
+    <text x="458" y="494" class="sans" font-size="24" fill="#C4B5FD">Pending · in progress · paused · completed</text>
+  </g>
+
+  <!-- Interactive view and native persistence are separate outcomes. -->
+  <g filter="url(#shadow)">
+    <rect x="1140" y="188" width="404" height="150" rx="24" fill="url(#glass)" stroke="#2A3851"/>
+    <circle cx="1177" cy="229" r="12" fill="#4ADE80" fill-opacity="0.16"/>
+    <path d="m1170 229 5 5 9-11" fill="none" stroke="#86EFAC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1202" y="238" class="heading">See progress</text>
+    <text x="1168" y="279" class="mono" font-size="28" fill="#86EFAC">/todos</text>
+    <text x="1168" y="312" class="copy">Optional terminal widget</text>
+
+    <rect x="1140" y="374" width="404" height="150" rx="24" fill="url(#glass)" stroke="#443962"/>
+    <text x="1168" y="422" class="heading">Pi session journal</text>
+    <text x="1168" y="463" class="copy">Saves todo changes</text>
+    <text x="1168" y="496" class="copy">on the current branch</text>
+  </g>
+
+  <text x="56" y="682" class="copy" fill="#91A0B8">A new session starts with an empty list.</text>
+  <text x="1544" y="682" text-anchor="end" class="eyebrow" fill="#64748B">NATIVE SESSION STATE</text>
+</svg>
