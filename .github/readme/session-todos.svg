@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
-  <title id="title">Your todo list travels with your Pi session</title>
+  <title id="title">Your todo list stays with your Pi session</title>
   <desc id="desc">Ask Pi to track a task. The agent updates a nested todo list, which you can inspect with /todos. Changes are saved in the native Pi session journal; resuming, forking, or compacting the session restores the list on the selected branch.</desc>
   <defs>
     <linearGradient id="canvas" x1="0" y1="0" x2="1" y2="1">
@@ -54,7 +54,7 @@
   <rect width="1600" height="720" fill="url(#violetBloom)"/>
   <rect width="1600" height="720" fill="url(#dotGrid)"/>
   <text x="56" y="64" class="eyebrow" fill="#93C5FD">PI TODO LIST</text>
-  <text x="56" y="126" class="sans" font-size="48" font-weight="700" letter-spacing="-1" fill="#F8FAFC">Your plan travels with the session</text>
+  <text x="56" y="126" class="sans" font-size="48" font-weight="700" letter-spacing="-1" fill="#F8FAFC">Your todo list stays with the session</text>
 
   <!-- Reserved connector lanes: updates, view, save, and restore. -->
   <path d="M356 263H424" class="connector" stroke="#60A5FA" marker-end="url(#arrowBlue)"/>
@@ -74,7 +74,7 @@
     <text x="84" y="310" class="copy">with todos.”</text>
 
     <rect x="56" y="374" width="300" height="150" rx="24" fill="url(#glass)" stroke="#2A3851"/>
-    <text x="84" y="422" class="heading">Pick up the work</text>
+    <text x="84" y="422" class="heading">Continue the task</text>
     <text x="84" y="463" class="copy">Resume · fork</text>
     <text x="84" y="496" class="copy">Compact context</text>
   </g>
