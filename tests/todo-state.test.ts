@@ -961,7 +961,9 @@ test("ordinary and retain-none requests reuse branch facts across small and long
     assert.match(first.messages[1]?.content ?? "", /Boundary task/);
     branches = 0; reads = 0;
     assert.deepEqual(request(), first);
-    assert.equal(branches, 0); assert.equal(reads, 0);
+    assert.equal(h.emit("before_agent_start", {}), undefined, "retain-none recovery belongs to the request");
+    h.emit("session_compact", { reason: "manual", willRetry: false });
+    assert.equal(branches, 0, "prompts and compaction reuse branch facts"); assert.equal(reads, 0);
     await h.execute({ action: "update", id: 1, text: "Later task" });
     assert.deepEqual(request(), first, "later results do not rewrite the cacheable recovery prefix");
     assert.equal(reads, 2, "only the appended commit and result are inspected");
@@ -1353,62 +1355,54 @@ test("corrupt restore rejects pending mutations until a successful read checkpoi
   assert.match((await harness.execute({ action: "add", text: "After reconciliation" }))?.content[0]?.text ?? "", /Added #13:/);
 });
 
-test("add-only batch-log restore avoids per-log state clones", async (t) => {
-  const makeBranch = (size: number) => Array.from({ length: size / 2 }, (_, index) => ({
-    type: "message",
-    message: {
-      role: "toolResult",
-      toolName: "todo_list",
-      details: { version: 3, operations: [{ action: "add", text: `Todo ${index * 2 + 1}` }, { action: "add", text: `Todo ${index * 2 + 2}` }] },
-    },
-  }));
-  const prepare = (size: number) => {
+test("restore replays nested lifecycle logs in linear time", async (t) => {
+  // Each commit adds a parent and child, then starts, completes and reopens them, so replay
+  // exercises ID lookups, ancestor walks and subtree cascades while the list grows.
+  const makeBranch = (size: number) => Array.from({ length: size / 2 }, (_, index) => {
+    const parent = index * 2 + 1;
+    const child = parent + 1;
+    return { type: "custom", customType: "todo-list-state", data: { toolCallId: `restore-${index}`, details: { version: 8, operations: [
+      { action: "add", id: parent, text: `Todo ${parent}` },
+      { action: "add", id: child, text: `Todo ${child}`, parentId: parent },
+      { action: "start", id: child }, { action: "complete", id: parent }, { action: "reopen", id: parent },
+    ] } } };
+  });
+  const sizes = [1_000, 8_000] as const;
+  const harnesses = sizes.map((size) => {
     const harness = createExtensionHarness();
     harness.setHasUI(false);
     // Copy the fixture once, outside measurement. session_tree still runs the
     // production restore from scratch, not the tool's incremental mutation path.
     harness.switchBranch(makeBranch(size));
     return harness;
-  };
-  const measure = (harness: ReturnType<typeof createExtensionHarness>, windowMs = 250) => {
-    const started = performance.now();
-    let runs = 0;
-    let elapsed: number;
-    do {
+  });
+  // The fastest of several runs filters GC and scheduler noise without long timing windows.
+  const fastest = (harness: ReturnType<typeof createExtensionHarness>) => {
+    let best = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < 3; run += 1) {
+      const started = performance.now();
       harness.emit("session_tree", {});
-      runs += 1;
-      elapsed = performance.now() - started;
-    } while (elapsed < windowMs);
-    return elapsed / runs;
-  };
-  const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
-  const smallHarness = prepare(1_000);
-  const largeHarness = prepare(4_000);
-  // Individual restores can take less than a millisecond. Give both sizes time
-  // to warm up, then amortize JIT/GC/scheduling noise over longer windows; a
-  // 25ms window still drifted substantially across samples on hosted runners.
-  measure(smallHarness, 500);
-  measure(largeHarness, 500);
-  const samples = [[], []] as [number[], number[]];
-  const harnesses = [smallHarness, largeHarness];
-  for (let sample = 0; sample < 5; sample += 1) {
-    for (const index of sample % 2 === 0 ? [0, 1] : [1, 0]) {
-      samples[index]!.push(measure(harnesses[index]!));
+      best = Math.min(best, performance.now() - started);
     }
+    return best;
+  };
+  for (const harness of harnesses) fastest(harness);
+  const times = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  for (let round = 0; round < 4; round += 1) {
+    for (const index of round % 2 === 0 ? [0, 1] : [1, 0]) times[index] = Math.min(times[index]!, fastest(harnesses[index]!));
   }
-  const small = median(samples[0]);
-  const large = median(samples[1]);
-  t.diagnostic(`Restore ms/run (1000, 4000 todos; >=250ms/sample): ${JSON.stringify(samples)}`);
+  const [small, large] = times as [number, number];
+  t.diagnostic(`Fastest restore ms (${sizes.join(", ")} todos): ${small.toFixed(3)}, ${large.toFixed(3)}`);
 
-  // Four times the items permits 6x work, but not per-log cloning's ~16x.
-  assert.ok(large < small * 6, `Expected add-only restore to scale near-linearly, got ${small.toFixed(2)}ms -> ${large.toFixed(2)}ms`);
-  for (const [harness, size] of [[smallHarness, 1_000], [largeHarness, 4_000]] as const) {
+  // Eight times the items scales about 8x; per-operation list scans or per-log cloning exceed 60x.
+  assert.ok(large < small * 24, `Expected restore to scale near-linearly, got ${small.toFixed(2)}ms -> ${large.toFixed(2)}ms`);
+  for (const [index, size] of sizes.entries()) {
     // Check every restored item outside the timer, independently of replay logic.
     for (let offset = 0; offset < size; offset += 100) {
-      const restored = await harness.execute({ action: "list", offset });
+      const restored = await harnesses[index]!.execute({ action: "list", offset });
       assert.equal(restored?.content[0]?.text, [
         `TODO: 0 active, ${size} pending, 0 completed`,
-        ...Array.from({ length: 100 }, (_, index) => `- #${offset + index + 1} Todo ${offset + index + 1}`),
+        ...Array.from({ length: 100 }, (_, row) => `${(offset + row) % 2 ? "  " : ""}- #${offset + row + 1} Todo ${offset + row + 1}`),
         `Showing ${offset + 1}-${offset + 100} of ${size} open`,
       ].join("\n"));
     }

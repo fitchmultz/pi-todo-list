@@ -124,8 +124,34 @@ export function cloneState(state: TodoState): TodoState {
   return { items, nextId: Math.max(requestedNextId, maxId + 1) };
 }
 
+// Lookups for one items array. add, move and remove keep it current in place; clear and batch
+// commits replace the array, so the next lookup indexes the new one.
+interface TodoIndex {
+  byId: Map<number, TodoItem>;
+  children: Map<number, TodoItem[]>;
+}
+const indexes = new WeakMap<TodoItem[], TodoIndex>();
+
+function todoIndex(state: TodoState): TodoIndex {
+  let index = indexes.get(state.items);
+  if (!index) {
+    index = { byId: new Map(), children: new Map() };
+    for (const todo of state.items) indexTodo(index, todo);
+    indexes.set(state.items, index);
+  }
+  return index;
+}
+
+function indexTodo(index: TodoIndex, todo: TodoItem): void {
+  if (!index.byId.has(todo.id)) index.byId.set(todo.id, todo);
+  if (todo.parentId === undefined) return;
+  const siblings = index.children.get(todo.parentId);
+  if (siblings) siblings.push(todo);
+  else index.children.set(todo.parentId, [todo]);
+}
+
 function item(state: TodoState, id: number): TodoItem {
-  const found = state.items.find((candidate) => candidate.id === id);
+  const found = todoIndex(state).byId.get(id);
   if (!found) throw new Error(`Todo #${id} not found`);
   return found;
 }
@@ -133,7 +159,8 @@ function item(state: TodoState, id: number): TodoItem {
 function concise(text: string, limit = TODO_TEXT_LIMIT, field = "text"): string {
   const value = text.replace(CONTROL_CHARACTERS, " ").trim();
   if (!value) throw new Error(`Todo ${field} cannot be empty`);
-  if ([...value].length > limit) throw new Error(`Todo ${field} cannot exceed ${limit} characters`);
+  // UTF-16 length bounds the code point count, so only long values need counting.
+  if (value.length > limit && [...value].length > limit) throw new Error(`Todo ${field} cannot exceed ${limit} characters`);
   return value;
 }
 
@@ -143,29 +170,24 @@ function normalizeLink(link: string | null | undefined): string | undefined {
   return concise(link, TODO_LINK_LIMIT, "link");
 }
 
-function descendants(state: TodoState, id: number): Set<number> {
-  const byParent = new Map<number, number[]>();
-  for (const candidate of state.items) {
-    if (candidate.parentId === undefined) continue;
-    const children = byParent.get(candidate.parentId) ?? [];
-    children.push(candidate.id);
-    byParent.set(candidate.parentId, children);
-  }
-
-  const ids = new Set<number>();
-  const stack = [id];
+function subtree(state: TodoState, root: TodoItem): TodoItem[] {
+  const { children } = todoIndex(state);
+  const seen = new Set<number>();
+  const todos: TodoItem[] = [];
+  const stack = [root];
   while (stack.length > 0) {
     const current = stack.pop()!;
-    if (ids.has(current)) continue;
-    ids.add(current);
-    for (const child of byParent.get(current) ?? []) stack.push(child);
+    if (seen.has(current.id)) continue;
+    seen.add(current.id);
+    todos.push(current);
+    for (const child of children.get(current.id) ?? []) stack.push(child);
   }
-  return ids;
+  return todos;
 }
 
 function ancestorChain(state: TodoState, target: TodoItem): TodoItem[] {
   if (target.parentId === undefined) return [];
-  const byId = new Map(state.items.map((todo) => [todo.id, todo]));
+  const { byId } = todoIndex(state);
   const seen = new Set([target.id]);
   const ancestors: TodoItem[] = [];
   let parentId: number | undefined = target.parentId;
@@ -196,6 +218,8 @@ export function addTodo(state: TodoState, text: string, parentId?: number, link?
   const added = { id, text: value, status, ...(parentId === undefined ? {} : { parentId }), ...(detailLink === undefined ? {} : { link: detailLink }) };
   state.nextId = id + 1;
   state.items.push(added);
+  const index = indexes.get(state.items);
+  if (index) indexTodo(index, added);
   return added;
 }
 
@@ -212,11 +236,19 @@ export function updateTodo(state: TodoState, id: number, text?: string, link?: s
 
 export function moveTodo(state: TodoState, id: number, parentId?: number): TodoItem {
   const found = item(state, id);
-  if (parentId !== undefined) {
-    const parent = item(state, parentId);
-    if (descendants(state, id).has(parent.id)) throw new Error("Cannot move a todo under itself or its descendant");
+  const parent = parentId === undefined ? undefined : item(state, parentId);
+  if (parent) {
+    if (subtree(state, found).includes(parent)) throw new Error("Cannot move a todo under itself or its descendant");
     if (parent.status === "completed") throw new Error("Cannot move under a completed todo");
-    found.parentId = parentId;
+  }
+  const index = todoIndex(state);
+  if (found.parentId !== undefined) {
+    const siblings = index.children.get(found.parentId)!;
+    siblings.splice(siblings.indexOf(found), 1);
+  }
+  if (parent) {
+    found.parentId = parent.id;
+    indexTodo(index, found);
   } else {
     delete found.parentId;
   }
@@ -240,24 +272,42 @@ export function pauseTodo(state: TodoState, id: number): TodoItem {
 }
 
 export function completeTodo(state: TodoState, id: number): number {
-  const ids = descendants(state, item(state, id).id);
-  for (const candidate of state.items) if (ids.has(candidate.id)) candidate.status = "completed";
-  return ids.size;
+  const todos = subtree(state, item(state, id));
+  for (const todo of todos) todo.status = "completed";
+  return todos.length;
 }
 
 export function reopenTodo(state: TodoState, id: number): number {
   const target = item(state, id);
-  const ids = descendants(state, target.id);
+  const todos = subtree(state, target);
   const ancestors = ancestorChain(state, target);
-  for (const candidate of state.items) if (ids.has(candidate.id)) candidate.status = "pending";
+  for (const todo of todos) todo.status = "pending";
   reopenCompleted(ancestors);
-  return ids.size;
+  return todos.length;
 }
 
 export function removeTodo(state: TodoState, id: number): number {
-  const ids = descendants(state, item(state, id).id);
-  state.items = state.items.filter((candidate) => !ids.has(candidate.id));
-  return ids.size;
+  const target = item(state, id);
+  const removed = subtree(state, target);
+  const index = todoIndex(state);
+  for (const todo of removed) {
+    index.byId.delete(todo.id);
+    index.children.delete(todo.id);
+  }
+  // Only the removed root's parent loses a child; descendants' lists were dropped above.
+  if (target.parentId !== undefined) {
+    const siblings = index.children.get(target.parentId)!;
+    siblings.splice(siblings.indexOf(target), 1);
+  }
+  if (removed.length === 1) {
+    state.items.splice(state.items.indexOf(target), 1);
+  } else {
+    const gone = new Set(removed);
+    let kept = 0;
+    for (const todo of state.items) if (!gone.has(todo)) state.items[kept++] = todo;
+    state.items.length = kept;
+  }
+  return removed.length;
 }
 
 export function clearCompleted(state: TodoState): number {
@@ -382,7 +432,8 @@ export function applyTodoBatch(state: TodoState, operations: TodoBatchMutation[]
   if (!Array.isArray(operations) || operations.length === 0 || operations.length > BATCH_OPERATION_LIMIT) {
     throw new Error(`operations must contain 1-${BATCH_OPERATION_LIMIT} mutations`);
   }
-  const draft = cloneState(state);
+  // Live state is already valid; the draft only needs to be independent for rollback.
+  const draft: TodoState = { items: state.items.map((todo) => ({ ...todo })), nextId: state.nextId };
   const messages: string[] = [];
   const canonical: TodoMutation[] = [];
   const refs = new Map<string, number>();
