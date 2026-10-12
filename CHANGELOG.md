@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.4] - 2026-10-12
+
+### Changed
+
+- Restore, resume, and tree navigation replay the journal in linear time. Long sessions with thousands of todos restore up to 10x faster, and nested lifecycle changes and batches on large lists no longer rescan every item.
+- Prompts, provider requests, and compaction reuse cached branch facts instead of rescanning the session. Requests without a retain-none boundary or native window skip message scanning.
+
 ## [0.10.3] - 2026-10-10
 
 ### Fixed

@@ -256,8 +256,8 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   let recoveryNeeded = false;
   let widgetVisible = process.env.PI_TODO_WIDGET?.trim().toLowerCase() === "show";
   let boundaryContext: { id: string; message: ContextWithSystemEvent["messages"][number] | null } | undefined;
-  let observedLeaf: string | null = null;
-  let compaction: BranchEntry | undefined;
+  // Nearest compaction and recovery marker on the selected branch, and whether it has a native window.
+  let facts: { leaf: string | null; compaction?: BranchEntry; marker?: BranchEntry; window: boolean } = { leaf: null, window: false };
   let failedCheckpoints: Set<string> | undefined;
   let failedIndexSession: string | undefined;
 
@@ -282,22 +282,28 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     return failed;
   };
 
-  const latestCompaction = (ctx: ExtensionContext): BranchEntry | undefined => {
+  // Walks only entries added since the last observed leaf; navigation elsewhere walks the new branch.
+  const branchFacts = (ctx: ExtensionContext): typeof facts => {
     const leaf = ctx.sessionManager.getLeafId();
+    if (leaf === facts.leaf) return facts;
+    const next: typeof facts = { leaf, window: false };
     let id = leaf;
-    while (id && id !== observedLeaf) {
+    while (id && id !== facts.leaf) {
       const entry = ctx.sessionManager.getEntry(id);
       if (!entry) break;
-      if (entry.type === "compaction") {
-        compaction = entry;
-        observedLeaf = leaf;
-        return compaction;
-      }
+      const type = (entry as { type: string }).type;
+      if (type === "compaction") next.compaction ??= entry;
+      if (type === "context_window") next.window = true;
+      if (type === "compaction" || type === "context_window"
+        || (entry.type === "custom_message" && entry.customType === TODO_CONTEXT_TYPE)) next.marker ??= entry;
       id = entry.parentId;
     }
-    if (id !== observedLeaf) compaction = undefined; // Navigation outside the indexed ancestry.
-    observedLeaf = leaf;
-    return compaction;
+    if (id === facts.leaf) {
+      next.compaction ??= facts.compaction;
+      next.marker ??= facts.marker;
+      next.window ||= facts.window;
+    }
+    return facts = next;
   };
 
   const todoContextMessage = (snapshot = state) => ({
@@ -306,16 +312,10 @@ export default function todoListExtension(pi: ExtensionAPI): void {
     display: false,
   });
 
+  // Retain-none recovery belongs to the request boundary, including in-run continuation.
   const needsTodoContext = (ctx: ExtensionContext): boolean => {
-    const branch = ctx.sessionManager.getBranch();
-    for (let index = branch.length - 1; index >= 0; index -= 1) {
-      const entry = branch[index]!;
-      if (entry.type === "custom_message" && entry.customType === TODO_CONTEXT_TYPE) return false;
-      if ((entry as { type: string }).type === "context_window") return false;
-      // Retain-none recovery belongs to the request boundary, including in-run continuation.
-      if (entry.type === "compaction") return entry.firstKeptEntryId !== entry.id;
-    }
-    return false;
+    const marker = branchFacts(ctx).marker;
+    return marker?.type === "compaction" && marker.firstKeptEntryId !== marker.id;
   };
 
   const updateWidget = (ctx: ExtensionContext): void => {
@@ -348,8 +348,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
 
   const rehydrate = (ctx: ExtensionContext): void => {
     boundaryContext = undefined;
-    observedLeaf = null;
-    compaction = undefined;
+    facts = { leaf: null, window: false };
     const restored = restore(ctx.sessionManager.getBranch(), undefined,
       (entry) => failedRecoveryCheckpoints(ctx).has(entry.id));
     state = restored.state;
@@ -368,6 +367,10 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   pi.on("session_tree", (_event, ctx) => rehydrate(ctx));
 
   pi.on("context_with_system", (event, ctx) => {
+    const { compaction: boundary, window } = branchFacts(ctx);
+    const retainNone = boundary?.type === "compaction" && boundary.firstKeptEntryId === boundary.id;
+    // Only a retain-none boundary or a native window can need a recovery snapshot.
+    if (!retainNone && !window) return;
     if (event.messages.some((message) => message.role === "custom" && message.customType === TODO_CONTEXT_TYPE)) return;
     const markerIndex = event.messages.findIndex((message) =>
       message.role === "custom"
@@ -377,8 +380,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
       && typeof (message.details as { windowId?: unknown }).windowId === "string"
     );
     if (markerIndex < 0) {
-      const boundary = latestCompaction(ctx);
-      if (boundary?.type !== "compaction" || boundary.firstKeptEntryId !== boundary.id) return;
+      if (!retainNone) return;
       if (boundaryContext?.id !== boundary.id) {
         const branch = ctx.sessionManager.getBranch();
         const index = branch.findIndex(entry => entry.id === boundary.id);
@@ -423,10 +425,7 @@ export default function todoListExtension(pi: ExtensionAPI): void {
   // A later compaction drops a native window's transient marker and snapshot.
   // Queue live state for that window, overflow retries, and between-turn compaction.
   pi.on("session_compact", (event, ctx) => {
-    const inNativeWindow = ctx.sessionManager.getBranch().some((entry) =>
-      (entry as { type: string }).type === "context_window"
-    );
-    if ((event.reason === "threshold" || event.willRetry || inNativeWindow) && hasTodoHistory()) {
+    if ((event.reason === "threshold" || event.willRetry || branchFacts(ctx).window) && hasTodoHistory()) {
       pi.sendMessage(todoContextMessage(), { deliverAs: "steer" });
     }
   });
