@@ -17,22 +17,11 @@ env:
   PI_AUTOMATION_REF: 54c687228d840506555801b9db038373e697d901 # main
 
 jobs:
-  resolve:
-    uses: fitchmultz/.github/.github/workflows/resolve-hosts.yml@54c687228d840506555801b9db038373e697d901 # main
-    with:
-      automation-ref: 54c687228d840506555801b9db038373e697d901 # main
-
   compatibility:
-    needs: resolve
-    if: ${{ !cancelled() }}
     name: compatibility / compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Require resolved latest hosts
-        env:
-          RESOLVE: ${{ needs.resolve.result }}
-        run: test "$RESOLVE" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: fitchmultz/.github
@@ -48,6 +37,13 @@ jobs:
           node-version: '24'
           check-latest: true
           package-manager-cache: false
+      # Resolving in this job avoids a second runner queue wait; a failed lookup fails the required check.
+      - name: Resolve latest Pi hosts once
+        id: hosts
+        working-directory: automation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/resolve-hosts.mjs --host both
       - name: Use the reviewed fork-build npm version
         run: npm install --global "$(node -p 'require("./automation/package.json").packageManager')"
       - id: targets
@@ -56,13 +52,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: fitchmultz/pi
-          ref: ${{ needs.resolve.outputs.fork-ref }}
+          ref: ${{ steps.hosts.outputs.fork-ref }}
           path: fork
           persist-credentials: false
       - name: Build the resolved fork package
         working-directory: fork
         env:
-          FORK_REF: ${{ needs.resolve.outputs.fork-ref }}
+          FORK_REF: ${{ steps.hosts.outputs.fork-ref }}
           PI_OFFLINE: '1'
           PI_TELEMETRY: '0'
         run: |
@@ -80,11 +76,11 @@ jobs:
         run: >
           node automation/scripts/qualify.mjs --repo pi-todo-list
           --source "$GITHUB_WORKSPACE/extension"
-          --host official --target "${{ needs.resolve.outputs.official-version }}"
+          --host official --target "${{ steps.hosts.outputs.official-version }}"
           --output "$RUNNER_TEMP/qualification-official"
       - name: Qualify maintained fork
         env:
-          PI_COMPAT_FORK_REF: ${{ needs.resolve.outputs.fork-ref }}
+          PI_COMPAT_FORK_REF: ${{ steps.hosts.outputs.fork-ref }}
         run: >
           node automation/scripts/qualify.mjs --repo pi-todo-list
           --source "$GITHUB_WORKSPACE/extension"
