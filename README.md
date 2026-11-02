@@ -6,7 +6,7 @@ Pi Todo List gives your [Pi](https://github.com/earendil-works/pi) agent a neste
 
 ## Install and start
 
-Use Pi 1.0.0 or later and Node.js 24 or later. Official Pi releases and the maintained fork both support this extension.
+Use Pi 1.5.0 or later and Node.js 24 or later. Official Pi releases and the maintained fork both support this extension.
 
 ```bash
 pi install git:github.com/fitchmultz/pi-todo-list

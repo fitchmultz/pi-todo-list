@@ -24,7 +24,7 @@ For a persistent local installation:
 pi install /absolute/path/to/pi-todo-list
 ```
 
-The development Pi cohort is official `1.0.0` (all eight Pi packages and host TypeBox `1.3.27`); the extension's development schema dependency is TypeBox `1.3.34`. Host dependencies and runtime peers are unchanged. No fork-only API is required.
+The development Pi cohort is official `1.5.0` (all eight Pi packages and host TypeBox `1.3.27`); the extension's development schema dependency is TypeBox `1.3.34`. Host dependencies and runtime peers are unchanged. No fork-only API is required.
 
 `check:compat` runs the state suite, native SDK lifecycle tests, typechecking, and a pack dry-run against the installed host. Native tests script only model output: Pi loads the extension, registers `todo_list` and `/todos`, executes and journals tools, navigates branches, resumes, and compacts. The retain-none test checks recovery after the public compaction boundary discards all prior provider context, without requiring retired native-window APIs. Use a disposable HOME/agent directory and no provider credentials.
 
